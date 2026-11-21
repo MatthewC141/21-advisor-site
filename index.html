@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>21 Advisor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,500;0,600;0,700;0,800;1,800;1,900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --felt: #1d6b3c; --felt-2: #11502b; --felt-3: #08331a;
+    --ink: #172033; --red: #d3242f;
+    --gold-1: #ffe9a3; --gold-2: #f7c548; --gold-3: #c98a12;
+    --blue-1: #6fb3ff; --blue-2: #2563d9; --blue-3: #183f99;
+    --green: #47e07f; --bad: #ff5a5f; --warn: #ffb02e;
+    --panel: rgba(10, 14, 24, .82); --panel-2: rgba(255,255,255,.06); --line: rgba(255,255,255,.10);
+    --fg: #ffffff; --muted: rgba(255,255,255,.62); --dim: rgba(255,255,255,.38);
+    --font: Poppins, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; min-height: 100%; color: var(--fg); font: 500 14px/1.4 var(--font); }
+  button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; }
+  button:disabled { cursor: default; opacity: .4; }
+  .mono { font-variant-numeric: tabular-nums; font-weight: 700; }
+  .muted { color: var(--muted); } .dim { color: var(--dim); }
+  .s-success { color: var(--green); } .s-error { color: var(--bad); } .s-warning { color: var(--warn); } .s-accent { color: var(--gold-2); }
+  html { background: #08070d; }
+  body { background: radial-gradient(ellipse at 50% 0%, #2a2140 0%, #120f1e 55%, #08070d 100%) no-repeat; min-height: 100vh; }
+  .s-pending { color: var(--blue-1); } .s-muted { color: var(--muted); }
+
+  .app { display: flex; gap: 22px; justify-content: center; align-items: flex-start; padding: 18px; flex-wrap: wrap; }
+
+  /* ---------- the felt table (phone) ---------- */
+  .table { width: 460px; max-width: 100%; border-radius: 34px; padding: 14px 14px 18px; position: relative;
+    background: radial-gradient(ellipse at 50% 30%, var(--felt) 0%, var(--felt-2) 55%, var(--felt-3) 100%);
+    box-shadow: 0 0 0 10px #111, 0 0 0 11px #333, 0 30px 80px rgba(0,0,0,.7), inset 0 0 90px rgba(0,0,0,.45); }
+  .hud { display: flex; gap: 8px; justify-content: space-between; }
+  .pill { background: rgba(0,0,0,.38); border-radius: 14px; height: 40px; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+    font-weight: 800; font-size: 18px; box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  .pill small { font-size: 11px; color: var(--muted); font-weight: 600; }
+  .hex { width: 20px; height: 22px; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); background: rgba(255,255,255,.55);
+    display: grid; place-items: center; position: relative; }
+  .hex::after { content: ""; position: absolute; inset: 2px; clip-path: inherit; background: #24402f; }
+  .hex.on { background: #ff6b6b; }
+  .hex.on::after { background: var(--bad); }
+  .hex.on::before { content: "✕"; position: relative; z-index: 1; font-size: 11px; font-weight: 900; color: #3a0508; }
+  .chip { width: 22px; height: 22px; border-radius: 50%; background: radial-gradient(circle, #fff 0 30%, var(--gold-2) 31% 60%, var(--gold-3) 61%);
+    box-shadow: 0 0 0 2px rgba(0,0,0,.25); flex: none; }
+  .staytok { font-size: 10px; font-weight: 800; letter-spacing: .04em; padding: 2px 6px; border-radius: 6px; background: linear-gradient(var(--gold-1), var(--gold-2)); color: #4a3000; }
+  .staytok.used { background: rgba(255,255,255,.12); color: var(--dim); }
+
+  .logo { text-align: center; margin: 8px 0 2px; line-height: 1; }
+  .logo .big { font: italic 900 40px var(--font); letter-spacing: -.02em;
+    background: linear-gradient(180deg, var(--gold-1) 10%, var(--gold-2) 50%, var(--gold-3) 90%); -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 2px 0 #5a3a00) drop-shadow(0 4px 6px rgba(0,0,0,.5)); }
+  .logo .sub { display: block; font: italic 800 12px var(--font); letter-spacing: .2em; color: var(--gold-1); opacity: .85; margin-top: 2px; }
+  .meta { text-align: center; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+
+  /* columns */
+  .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .col { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+  .tot { height: 58px; border-radius: 12px; display: grid; place-items: center; font-size: 26px; font-weight: 800;
+    background: rgba(255,255,255,.07); box-shadow: inset 0 0 0 2px rgba(255,255,255,.14); position: relative; }
+  .tot small { position: absolute; bottom: 3px; font-size: 9px; font-weight: 700; letter-spacing: .08em; color: var(--gold-1); }
+  .col.rec .tot { box-shadow: inset 0 0 0 2px var(--gold-2), 0 0 18px rgba(247,197,72,.45); }
+  .lane { min-height: 270px; border-radius: 10px; padding: 6px 5px 40px; position: relative; display: flex; flex-direction: column;
+    background: linear-gradient(rgba(255,255,255,.05), rgba(255,255,255,.02)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.07); }
+  .lane.can { cursor: pointer; }
+  .lane.can:hover { background: linear-gradient(rgba(255,255,255,.10), rgba(255,255,255,.04)); }
+  .col.rec .lane { box-shadow: inset 0 0 0 2px rgba(247,197,72,.8), 0 0 22px rgba(247,197,72,.25); }
+  .arrow { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); width: 46px; height: 70px; opacity: .9;
+    background: linear-gradient(180deg, rgba(71,224,127,.95), rgba(71,224,127,.15)); animation: bob 1s ease-in-out infinite;
+    clip-path: polygon(50% 0, 100% 40%, 68% 40%, 68% 100%, 32% 100%, 32% 40%, 0 40%); }
+  @keyframes bob { 50% { transform: translate(-50%, -6px); } }
+  .preview { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; font-size: 12px; font-weight: 700; color: var(--muted); }
+  .preview.good { color: var(--green); } .preview.bad { color: var(--bad); }
+  .stay { height: 30px; border-radius: 999px; font: italic 800 13px var(--font); letter-spacing: .04em; color: #4a3000;
+    background: linear-gradient(180deg, var(--gold-1), var(--gold-2) 55%, var(--gold-3)); box-shadow: 0 3px 0 #7a5200, 0 5px 10px rgba(0,0,0,.35); }
+  .stay:disabled { filter: grayscale(1); opacity: .3; }
+  .stay.hot { animation: pulse .8s ease-in-out infinite; box-shadow: 0 3px 0 #7a5200, 0 0 0 3px var(--warn), 0 0 22px var(--warn); }
+  @keyframes pulse { 50% { transform: scale(1.06); } }
+
+  /* playing cards */
+  .pc { width: 100%; aspect-ratio: 5 / 7; border-radius: 7px; background: linear-gradient(180deg, #fff, #eef0f3); color: var(--ink);
+    box-shadow: 0 1px 0 rgba(0,0,0,.15), 0 3px 8px rgba(0,0,0,.35); position: relative; flex: none; }
+  .lane .pc + .pc { margin-top: -98%; }
+  .pc .c { position: absolute; top: 3px; left: 6px; font-weight: 800; font-size: 15px; line-height: 1; }
+  .pc .b { position: absolute; inset: 22% 0 0; display: grid; place-items: center; font-weight: 800; font-size: 40px; letter-spacing: -.04em; }
+  .pc.red { color: var(--red); }
+  .pc.new { animation: deal .25s ease-out; }
+  @keyframes deal { from { transform: translateY(40px) scale(.9); opacity: 0; } }
+
+  /* draw zone */
+  .draw { display: flex; align-items: center; justify-content: center; gap: 18px; margin: 14px 0 8px; }
+  .back { width: 66px; aspect-ratio: 5 / 7; border-radius: 8px; position: relative; border: 4px solid #fff;
+    background: repeating-linear-gradient(45deg, #b3202a 0 5px, #d33a43 5px 10px); box-shadow: 0 4px 10px rgba(0,0,0,.4); }
+  .back::after { content: ""; position: absolute; inset: 8px; border: 2px solid rgba(255,255,255,.7); border-radius: 50%; }
+  .back b { position: absolute; right: -10px; bottom: -10px; background: #111; border-radius: 999px; min-width: 26px; height: 26px; padding: 0 6px;
+    display: grid; place-items: center; font-size: 12px; font-weight: 800; z-index: 1; }
+  .slot { width: 92px; aspect-ratio: 5 / 7; border-radius: 9px; border: 2px dashed rgba(255,255,255,.25); display: grid; place-items: center;
+    color: var(--dim); font-size: 12px; text-align: center; padding: 6px; }
+  .slot .pc .c { font-size: 18px; } .slot .pc .b { font-size: 52px; }
+  .slot.has { border: 0; cursor: pointer; }
+  .picker { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; padding: 10px; border-radius: 16px; background: rgba(0,0,0,.25); }
+  .picker .lbl { grid-column: 1 / -1; text-align: center; font-size: 12px; color: var(--muted); }
+  .mini { aspect-ratio: 5 / 6; border-radius: 7px; background: linear-gradient(180deg, #fff, #e8ebf0); color: var(--ink); font-weight: 800; font-size: 18px;
+    box-shadow: 0 2px 0 #9aa3b2, 0 4px 6px rgba(0,0,0,.3); transition: transform .08s; position: relative; }
+  .mini small { position: absolute; right: 4px; bottom: 1px; font-size: 9px; color: #7b8496; font-weight: 700; }
+  .mini:hover:not(:disabled) { transform: translateY(-2px); }
+  .mini:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 1px 0 #9aa3b2; }
+  .mini.on { box-shadow: 0 0 0 3px var(--gold-2), 0 0 16px var(--gold-2); transform: translateY(-3px); }
+  .mini.red { color: var(--red); }
+  .bar { display: flex; gap: 10px; justify-content: center; margin-top: 14px; }
+
+  /* glossy buttons */
+  .btn { height: 44px; padding: 0 26px; border-radius: 999px; font: italic 800 17px var(--font); letter-spacing: .01em; display: inline-flex; align-items: center; gap: 8px; }
+  .btn.blue { background: linear-gradient(180deg, var(--blue-1), var(--blue-2) 55%, var(--blue-3)); box-shadow: 0 4px 0 #0f2a6b, 0 8px 16px rgba(0,0,0,.4); text-shadow: 0 1px 0 rgba(0,0,0,.35); }
+  .btn.gold { color: #3d2600; background: linear-gradient(180deg, var(--gold-1), var(--gold-2) 55%, var(--gold-3)); box-shadow: 0 4px 0 #7a5200, 0 8px 16px rgba(0,0,0,.4); }
+  .btn.dark { background: rgba(255,255,255,.08); box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); font-style: normal; font-weight: 700; font-size: 13px; height: 34px; padding: 0 14px; }
+  .btn.sm { height: 34px; padding: 0 16px; font-size: 14px; }
+  .btn:active:not(:disabled) { transform: translateY(2px); }
+  kbd { font: 700 10px var(--font); min-width: 16px; height: 16px; padding: 0 4px; border-radius: 4px; background: rgba(0,0,0,.25); display: inline-grid; place-items: center; font-style: normal; }
+
+  /* ---------- side panels (results-screen vibe) ---------- */
+  .side { width: 560px; max-width: 100%; display: flex; flex-direction: column; gap: 14px; }
+  .topbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .topbar .sp { flex: 1; }
+  .panel { background: var(--panel); border-radius: 20px; padding: 14px 16px; box-shadow: inset 0 0 0 1px var(--line), 0 14px 40px rgba(0,0,0,.4); }
+  .ph { font: italic 800 15px var(--font); color: var(--gold-1); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .ph .n { font-style: normal; font-weight: 600; font-size: 12px; color: var(--muted); text-transform: none; letter-spacing: 0; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; border-radius: 999px; font-size: 12px; font-weight: 700;
+    background: rgba(255,255,255,.08); box-shadow: inset 0 0 0 1px currentColor; white-space: nowrap; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; display: inline-block; }
+  .blink { animation: blink 1s ease-in-out infinite; } @keyframes blink { 50% { opacity: .25; } }
+
+  .advice .move { font: italic 900 24px/1.15 var(--font); margin: 2px 0 4px;
+    background: linear-gradient(180deg, #fff, var(--gold-1)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .advice.staying .move { background: linear-gradient(180deg, #fff, var(--warn)); -webkit-background-clip: text; background-clip: text; }
+  .advice .res { font-weight: 700; margin-bottom: 10px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 13px; }
+  .kv .k { color: var(--muted); }
+  .meter { height: 6px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; margin: 12px 0 10px; }
+  .meter > div { height: 100%; background: linear-gradient(90deg, var(--gold-3), var(--gold-1)); transition: width .15s; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .hint { color: var(--dim); font-size: 12px; }
+  .err { color: var(--bad); font-size: 12px; font-weight: 700; }
+
+  .payrow { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pin { display: flex; align-items: center; border-radius: 12px; background: rgba(255,255,255,.07); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
+  .pin span { padding: 0 10px; font: italic 800 13px var(--font); color: #3d2600; background: linear-gradient(180deg, var(--gold-1), var(--gold-2)); height: 38px; display: grid; place-items: center; }
+  .pin input { width: 90px; height: 38px; border: 0; background: transparent; color: #fff; font: 800 17px var(--font); padding: 0 10px; outline: none; }
+  .pin:focus-within { box-shadow: inset 0 0 0 2px var(--gold-2); }
+
+  table { width: 100%; border-collapse: separate; border-spacing: 0 4px; font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-align: left; padding: 0 8px; white-space: nowrap; }
+  td { padding: 7px 8px; background: rgba(255,255,255,.05); white-space: nowrap; }
+  td:first-child { border-radius: 10px 0 0 10px; white-space: normal; }
+  td:last-child { border-radius: 0 10px 10px 0; }
+  th.e, td.e { text-align: right; }
+  td.e { font-variant-numeric: tabular-nums; font-weight: 700; }
+  tr.sel td { background: linear-gradient(180deg, rgba(247,197,72,.32), rgba(201,138,18,.22)); }
+  tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--gold-2); }
+  #moves { overflow-x: auto; }
+
+  .deck { display: grid; grid-template-columns: repeat(10, 1fr); gap: 6px; }
+  .deck > div { background: rgba(255,255,255,.05); border-radius: 10px; padding: 6px 4px; text-align: center; display: flex; flex-direction: column; gap: 3px; }
+  .deck .r { font-weight: 800; font-size: 13px; }
+  .deck .n { font-weight: 800; font-size: 18px; }
+  .deck .meter { margin: 0 4px; height: 4px; }
+  .deck .adj { display: flex; justify-content: center; gap: 2px; }
+  .deck .adj button { width: 20px; height: 20px; border-radius: 6px; background: rgba(255,255,255,.08); font-weight: 800; font-size: 12px; }
+  .empty { text-align: center; color: var(--muted); padding: 18px 8px; }
+  .empty b { display: block; color: #fff; font: italic 800 16px var(--font); }
+  .keys { color: var(--dim); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .about { color: var(--muted); font-size: 12.5px; margin: 0; }
+
+  /* toast: in-game callout */
+  .toast { position: fixed; left: 50%; top: 32%; transform: translate(-50%, -50%) scale(.6); opacity: 0; pointer-events: none; z-index: 20; text-align: center;
+    transition: opacity .15s, transform .25s cubic-bezier(.2, 1.6, .4, 1); }
+  .toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  .toast .t1 { font: italic 900 44px/1 var(--font); text-transform: uppercase; letter-spacing: -.01em;
+    background: linear-gradient(180deg, var(--gold-1) 15%, var(--gold-2) 55%, var(--gold-3)); -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 3px 0 #5a3a00) drop-shadow(0 6px 12px rgba(0,0,0,.6)); }
+  .toast.bad .t1 { background: linear-gradient(180deg, #ffd0d0, var(--bad) 60%, #9b1c22); -webkit-background-clip: text; background-clip: text; filter: drop-shadow(0 3px 0 #4a0508) drop-shadow(0 6px 12px rgba(0,0,0,.6)); }
+  .toast .t2 { font: italic 900 24px var(--font); color: #fff; text-shadow: 0 2px 0 #000, 0 0 12px rgba(0,0,0,.6); margin-top: 4px; }
+
+  /* dialogs */
+  dialog { background: #121522; color: #fff; border: 0; border-radius: 22px; padding: 0; width: min(640px, 95vw); box-shadow: inset 0 0 0 1px var(--line), 0 30px 80px rgba(0,0,0,.7); }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog form { display: flex; flex-direction: column; }
+  .ohead { padding: 16px 18px 4px; font: italic 900 22px var(--font); color: var(--gold-1); }
+  .obody { padding: 6px 18px 14px; display: flex; flex-direction: column; gap: 12px; max-height: 72vh; overflow: auto; }
+  .ofoot { padding: 12px 18px 16px; display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field > span { color: var(--muted); font-size: 12px; font-weight: 600; }
+  input, select { font: 700 14px var(--font); color: #fff; background: rgba(255,255,255,.07); border: 0; box-shadow: inset 0 0 0 1px var(--line); border-radius: 10px; padding: 0 10px; height: 36px; width: 100%; }
+  select option { background: #121522; }
+  input:focus, select:focus { outline: none; box-shadow: inset 0 0 0 2px var(--gold-2); }
+  input[type=checkbox] { width: auto; height: auto; accent-color: var(--gold-2); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .sect { font: italic 800 13px var(--font); color: var(--gold-1); text-transform: uppercase; letter-spacing: .05em; padding-top: 6px; }
+
+  @media (max-width: 520px) {
+    .app { padding: 10px 6px; }
+    .table { border-radius: 24px; box-shadow: 0 20px 50px rgba(0,0,0,.6), inset 0 0 70px rgba(0,0,0,.45); }
+    .pill { font-size: 15px; padding: 0 9px; height: 36px; }
+    .lane { min-height: 220px; }
+    .pc .b { font-size: 30px; } .pc .c { font-size: 13px; }
+    .deck { grid-template-columns: repeat(5, 1fr); }
+    .grid4 { grid-template-columns: 1fr 1fr; }
+    .grid2 { grid-template-columns: 1fr; }
+    .keys { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <section class="table">
+    <div class="hud" id="status"></div>
+    <div class="logo"><span class="big">21</span><span class="sub">ADVISOR</span></div>
+    <div class="meta" id="meta"></div>
+    <div class="board" id="board"></div>
+    <div class="draw">
+      <div class="back" title="Unseen cards"><b id="deckTotal"></b></div>
+      <div id="curCard" class="slot"></div>
+    </div>
+    <div class="picker" id="cardBtns"></div>
+    <div class="bar">
+      <button id="btnUndo" class="btn blue" title="Undo (Backspace)">Undo</button>
+      <button id="btnApplyMain" class="btn gold" title="Apply best move (Enter)">Play best</button>
+    </div>
+  </section>
+
+  <aside class="side">
+    <div class="topbar">
+      <span id="badges" class="row"></span>
+      <span class="sp"></span>
+      <button id="btnEdit" class="btn dark" title="Edit state (E)">Edit state</button>
+      <button id="btnSettings" class="btn dark" title="Settings (,)">Settings</button>
+      <button id="btnNew" class="btn dark" title="New game (N)">New game</button>
+    </div>
+
+    <div class="panel">
+      <div class="ph">This game's payout <span class="n">copy the three scores the game shows</span></div>
+      <div class="payrow">
+        <label class="pin"><span>1x</span><input id="pBE" type="number" min="0" step="1"></label>
+        <label class="pin"><span>2.2x</span><input id="p22" type="number" min="0" step="1"></label>
+        <label class="pin"><span>2.7x</span><input id="p27" type="number" min="0" step="1"></label>
+      </div>
+      <div class="hint" style="margin-top:6px">Exponential between those scores and below break even; flat at 2.7x above the max.</div>
+      <div class="err" id="payErr"></div>
+    </div>
+
+    <div class="panel advice" id="recPanel"></div>
+
+    <div class="panel">
+      <div class="ph"><span id="movesNote">All moves</span></div>
+      <div id="moves"></div>
+    </div>
+
+    <div class="panel">
+      <div class="ph">Cards left <span class="n" id="deckLeft"></span></div>
+      <div class="deck" id="deck"></div>
+    </div>
+
+    <div class="keys">
+      <span><kbd>A</kbd> <kbd>2</kbd>–<kbd>9</kbd> <kbd>0</kbd> <kbd>J</kbd> <kbd>Q</kbd> <kbd>K</kbd> card</span>
+      <span><kbd>↵</kbd> play best</span>
+      <span><kbd>⇧1</kbd>–<kbd>⇧4</kbd> place on column</span>
+      <span><kbd>L</kbd> think longer</span>
+      <span><kbd>⌫</kbd> undo</span>
+      <span><kbd>E</kbd> edit</span>
+      <span><kbd>,</kbd> settings</span>
+      <span><kbd>N</kbd> new game</span>
+    </div>
+    <p class="about">How it works: for every distinct move (including STAY a column, then place) the advisor plays out the rest of the game thousands
+      of times over random orders of the cards still unseen, using a trained fast policy for later moves, and scores each finished game on this
+      game's payout curve. All moves share the same simulated futures, so the gaps between them are measured tightly. Near the max it plays safe;
+      far below it takes more risk.</p>
+  </aside>
+</div>
+
+<div class="toast" id="toast"><div class="t1"></div><div class="t2"></div></div>
+
+<dialog id="dlgSettings">
+  <form method="dialog" id="formSettings">
+    <div class="ohead">Settings</div>
+    <div class="obody">
+      <label class="field"><span>Optimise for</span>
+        <select name="objective">
+          <option value="payout">Expected payout (uses the curve)</option>
+          <option value="score">Expected score (ignores the curve)</option>
+        </select>
+      </label>
+      <div class="sect">Rules</div>
+      <div class="grid4">
+        <label class="field"><span>21</span><input name="pts21" type="number"></label>
+        <label class="field"><span>Three 7s</span><input name="pts777" type="number"></label>
+        <label class="field"><span>5 cards</span><input name="pts5" type="number"></label>
+        <label class="field"><span>5 cards = 21</span><input name="pts5x21" type="number"></label>
+        <label class="field"><span>Streak bonus</span><input name="streakBase" type="number"></label>
+        <label class="field"><span>Streak step</span><input name="streakInc" type="number"></label>
+        <label class="field"><span>Busts to end</span><input name="maxBusts" type="number" min="1"></label>
+        <label class="field"><span>Stays per game</span><input name="stays" type="number" min="0"></label>
+      </div>
+      <span class="hint">The streak bonus is paid when a column scores on the turn right after another scoring turn; each further turn in a row adds the
+        step. The fast policy was trained on the defaults (400 / 600 / 800 / 1000, +250); the simulations always use the rules here.</span>
+      <div class="sect">Engine</div>
+      <div class="grid2">
+        <label class="field"><span>Think time per card (s)</span><input name="thinkSec" type="number" step="0.5" min="0.5"></label>
+        <label class="field"><span>Worker threads</span><input name="workers" type="number" min="1" max="32"></label>
+      </div>
+    </div>
+    <div class="ofoot">
+      <button type="button" class="btn dark" id="btnDefaults" style="margin-right:auto">Reset defaults</button>
+      <button value="cancel" formnovalidate class="btn dark">Cancel</button>
+      <button value="ok" class="btn gold sm">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgEdit">
+  <form method="dialog" id="formEdit">
+    <div class="ohead">Edit state</div>
+    <div class="obody">
+      <span class="muted">Join a game in progress or fix a mistake. Columns are cards separated by spaces, e.g. <b>K 5</b> or <b>A 3 2</b>.</span>
+      <div class="grid4">
+        <label class="field"><span>Column 1</span><input name="c0"></label>
+        <label class="field"><span>Column 2</span><input name="c1"></label>
+        <label class="field"><span>Column 3</span><input name="c2"></label>
+        <label class="field"><span>Column 4</span><input name="c3"></label>
+        <label class="field"><span>Score</span><input name="score" type="number"></label>
+        <label class="field"><span>Busts used</span><input name="busts" type="number" min="0"></label>
+        <label class="field"><span>Stays left</span><input name="staysLeft" type="number" min="0"></label>
+        <label class="field"><span>Streak</span><input name="streak" type="number" min="0"></label>
+      </div>
+      <label class="field"><span>Unseen cards: A 2 3 4 5 6 7 8 9 and 10-value (10/J/Q/K)</span><input name="deck"></label>
+      <label class="row"><input type="checkbox" name="recalc"> <span class="muted">Recalculate unseen as full deck minus the cards in the columns (only if nothing has cleared yet)</span></label>
+      <div class="err" id="editErr"></div>
+    </div>
+    <div class="ofoot">
+      <button value="cancel" formnovalidate class="btn dark">Cancel</button>
+      <button value="ok" class="btn gold sm">Apply</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="engine.js"></script>
+<script src="params.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
