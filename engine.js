@@ -321,13 +321,16 @@ function EngineFactory() {
 
   // ---- payout curve ----
   // The game states three scores: break even (1x), the 2.2x score and the max (2.7x) score.
-  // Exponential through (be, 1) and (s22, 2.2), extended below break even; exponential again
-  // from (s22, 2.2) to (s27, 2.7); flat at the max beyond.
-  const DEFAULT_CURVE = { be: 4700, s22: 7823, s27: 7900, m22: 2.2, m27: 2.7 };
+  // Exponential through (be, 1) and (s22, 2.2); exponential again from (s22, 2.2) to (s27, 2.7);
+  // flat at the max beyond. Below break even it decays more gently, at `low` per (s22 - be) points:
+  // fitted to an observed game (be 6500, s22 10717: score 6350 paid 0.988x).
+  const LOW_RATE = -Math.log(0.988) / (150 / (10717 - 6500));
+  const DEFAULT_CURVE = { be: 4700, s22: 7823, s27: 7900, m22: 2.2, m27: 2.7, low: LOW_RATE };
   function payout(score, c) {
     if (score >= c.s27) return c.m27;
     if (score >= c.s22) return c.m22 * Math.pow(c.m27 / c.m22, (score - c.s22) / (c.s27 - c.s22));
-    return Math.pow(c.m22, (score - c.be) / (c.s22 - c.be));
+    if (score >= c.be) return Math.pow(c.m22, (score - c.be) / (c.s22 - c.be));
+    return Math.exp((-(c.low || LOW_RATE) * (c.be - score)) / (c.s22 - c.be));
   }
 
   return {
