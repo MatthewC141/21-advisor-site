@@ -56,6 +56,8 @@ function workerMain(scope) {
     return {
       objective: 'payout',
       curve: Object.assign({}, E.DEFAULT_CURVE),
+      mode: 'cash', // 'cash': payout curve; 'streak': pass every game's target to win streakGame.payout
+      streakGame: { targets: [6350, 7751], payout: 3, game: 0 },
       rules: Object.assign({}, E.DEFAULT_RULES),
       thinkSec: 3,
       workers: Math.max(1, Math.min(12, (navigator.hardwareConcurrency || 4) - 1)),
@@ -77,15 +79,29 @@ function workerMain(scope) {
   let settings = Object.assign(defaultSettings(), load(LS_SET) || {});
   settings.rules = Object.assign({}, E.DEFAULT_RULES, settings.rules);
   if (!settings.curve || !(settings.curve.be > 0)) settings.curve = Object.assign({}, E.DEFAULT_CURVE); // pre-exponential saves
+  settings.streakGame = Object.assign(defaultSettings().streakGame, settings.streakGame);
+  const isStreak = () => settings.mode === 'streak';
+  const target = () => settings.streakGame.targets[Math.min(settings.streakGame.game, settings.streakGame.targets.length - 1)];
   let ctx = E.makeContext(settings.rules, ENGINE_PARAMS);
 
   // ---------- payout lookup ----------
   let payTab = null;
   let BE = 4700;
   let MAXS = 7900;
+  // Utility per final score: the cash curve, or 1/0 for passing this game's target in streak mode.
   function rebuildPayout() {
     const c = settings.curve;
     payTab = new Float64Array(30001);
+    if (isStreak()) {
+      // Rank moves by a smooth, mostly linear score curve whose 1x point sits 1,250 below the target, not by
+      // pass/fail. 240-game tests at a 7,751 target: pass/fail utility beat it 35%, a curve anchored at the
+      // target 47%, this shape 51% (rollouts need a score gradient; pushing score is what passes targets).
+      const t = target();
+      const sc = Object.assign({}, c, { be: t - 1250, s22: t + 1383, s27: t + 4000 });
+      for (let s = 0; s <= 30000; s++) payTab[s] = E.payout(s, sc);
+      BE = MAXS = t;
+      return;
+    }
     for (let s = 0; s <= 30000; s++) payTab[s] = E.payout(s, c);
     BE = c.be;
     MAXS = c.s27;
@@ -382,8 +398,16 @@ function workerMain(scope) {
     return [`Column becomes ${totalText(nc)} · ${n} card${n === 1 ? '' : 's'}`, ''];
   }
 
-  const evText = (x) => (settings.objective === 'score' ? fmt(x) : x.toFixed(3) + 'x');
-  const diffText = (x) => (settings.objective === 'score' ? fmt(x) : x.toFixed(3));
+  const evText = (x) => (settings.objective === 'score' ? fmt(x) : isStreak() ? pct(x) : x.toFixed(3) + 'x');
+  const diffText = (x) => (settings.objective === 'score' ? fmt(x) : isStreak() ? (100 * x).toFixed(1) + 'pt' : x.toFixed(3));
+  const evLabel = () => (settings.objective === 'score' ? 'Avg score' : isStreak() ? 'Chance to beat target' : 'Expected payout');
+  const reachRows = (row) =>
+    isStreak()
+      ? [[`Beat ${fmt(BE)}`, `<span class="mono">${pct(row.pBE)}</span>`]]
+      : [
+          [`Reach ${fmt(BE)} (1x)`, `<span class="mono">${pct(row.pBE)}</span>`],
+          [`Reach ${fmt(MAXS)} (max)`, `<span class="mono">${pct(row.pMax)}</span>`],
+        ];
 
   function verdict(st) {
     if (!st || !st.n) return null;
@@ -428,6 +452,25 @@ function workerMain(scope) {
     $('btnApplyMain').disabled = !recommended();
     if (isOver()) {
       const lost = G.busts >= R.maxBusts && R.bustOutLoses;
+      if (isStreak()) {
+        const sg = settings.streakGame;
+        const passed = !lost && G.score >= target();
+        const more = passed && sg.game < sg.targets.length - 1;
+        p.innerHTML = `<div class="ph">Game ${sg.game + 1} of ${sg.targets.length} over</div>
+          <div class="move">${passed ? (more ? 'Target beaten!' : `Streak won! ${sg.payout}x`) : 'Streak lost'}</div>
+          <div class="res ${passed ? 's-success' : 's-error'}">${lost ? 'Lost on busts' : fmt(G.score) + ' points'} vs target ${fmt(target())}</div>
+          <div class="row" style="margin-top:12px"><button class="btn gold sm" id="btnNew2">${more ? `Start game ${sg.game + 2} (target ${fmt(sg.targets[sg.game + 1])})` : 'New streak'}</button></div>`;
+        $('btnNew2').onclick = () => {
+          sg.game = more ? sg.game + 1 : 0;
+          save(LS_SET, settings);
+          rebuildPayout();
+          renderPayoutInputs();
+          snapshot();
+          G = newGame();
+          commit();
+        };
+        return;
+      }
       const m = lost ? 0 : E.payout(G.score, settings.curve);
       p.innerHTML = `<div class="ph">Game over</div>
         <div class="move">${lost ? 'Lost on busts' : fmt(G.score) + ' points'}</div>
@@ -446,10 +489,9 @@ function workerMain(scope) {
         ${
           row
             ? kv([
-                ['Game value now', `<span class="mono">${evText(row.ev)}</span>`],
+                [isStreak() ? 'Chance to beat target' : 'Game value now', `<span class="mono">${isStreak() ? pct(row.pBE) : evText(row.ev)}</span>`],
                 ['Avg final score', `<span class="mono">${fmt(row.meanScore)}</span>`],
-                [`Reach ${fmt(BE)} (1x)`, `<span class="mono">${pct(row.pBE)}</span>`],
-                [`Reach ${fmt(MAXS)} (max)`, `<span class="mono">${pct(row.pMax)}</span>`],
+                ...reachRows(row),
                 ['Simulations', sims],
               ])
             : '<span class="muted">Estimating…</span>'
@@ -473,11 +515,17 @@ function workerMain(scope) {
       <div class="move">${esc(describeMove(best))}</div>
       <div class="res ${rtone ? 's-' + rtone : 'muted'}">${esc(rt)}</div>
       ${kv([
-        [settings.objective === 'score' ? 'Avg score' : 'Expected payout', `<span class="mono">${evText(best.ev)}</span>`],
-        ['Margin', second ? `<span class="mono">+${diffText(second.diff)}</span> <span class="muted">± ${diffText(second.se)} over next best</span>` : '<span class="muted">no alternative</span>'],
+        [evLabel(), `<span class="mono">${isStreak() ? pct(best.pBE) : evText(best.ev)}</span>`],
+        [
+          'Margin',
+          !second
+            ? '<span class="muted">no alternative</span>'
+            : isStreak()
+              ? `<span class="mono">${((best.pBE - second.pBE) * 100).toFixed(1)}pt</span> <span class="muted">beat-chance over next best</span>`
+              : `<span class="mono">+${diffText(second.diff)}</span> <span class="muted">± ${diffText(second.se)} over next best</span>`,
+        ],
         ['Avg final score', `<span class="mono">${fmt(best.meanScore)}</span>`],
-        [`Reach ${fmt(BE)} (1x)`, `<span class="mono">${pct(best.pBE)}</span>`],
-        [`Reach ${fmt(MAXS)} (max)`, `<span class="mono">${pct(best.pMax)}</span>`],
+        ...reachRows(best),
         ['Simulations', sims],
       ])}
       ${meterHtml()}
@@ -490,7 +538,8 @@ function workerMain(scope) {
 
   function renderMoves() {
     const el = $('moves');
-    $('movesNote').textContent = settings.objective === 'score' ? 'All moves · by expected score' : 'All moves · by expected payout';
+    $('movesNote').textContent =
+      settings.objective === 'score' ? 'All moves · by expected score' : isStreak() ? 'All moves · by chance to beat target' : 'All moves · by expected payout';
     const st = cur && cur.stats;
     if (!G.current || isOver() || !st || !st.n) {
       el.innerHTML = `<div class="empty"><b>${isOver() ? 'Game over' : G.current ? 'Simulating…' : 'No card yet'}</b>
@@ -498,16 +547,17 @@ function workerMain(scope) {
       return;
     }
     const rows = st.rows.map((r, j) => Object.assign({ j }, r)).sort((a, b) => b.ev - a.ev);
-    el.innerHTML = `<table><thead><tr><th>Move</th><th class="e">${settings.objective === 'score' ? 'Avg' : 'EV'}</th>
-      <th class="e">vs best</th><th class="e">Avg score</th><th class="e">≥ ${fmt(BE)}</th><th class="e">≥ ${fmt(MAXS)}</th></tr></thead><tbody>
+    const two = !isStreak();
+    el.innerHTML = `<table><thead><tr><th>Move</th><th class="e">${settings.objective === 'score' ? 'Avg' : isStreak() ? 'Beat' : 'EV'}</th>
+      <th class="e">vs best</th><th class="e">Avg score</th>${two ? `<th class="e">≥ ${fmt(BE)}</th><th class="e">≥ ${fmt(MAXS)}</th>` : ''}</tr></thead><tbody>
       ${rows
         .slice(0, 8)
         .map((r) => {
           const [rt, tone] = resultOf(r);
           const isBest = r.j === st.best;
           return `<tr class="${isBest ? 'sel' : ''}"><td>${r.stay >= 0 ? '<b class="staytag">STAY</b> ' : ''}${esc(describeMove(r))}<br><span class="${tone ? 's-' + tone : 'muted'}" style="font-size:12px">${esc(rt)}</span></td>
-            <td class="e">${evText(r.ev)}</td><td class="e">${isBest ? '<span class="dim">—</span>' : `−${diffText(r.diff)}`}</td>
-            <td class="e">${fmt(r.meanScore)}</td><td class="e">${pct(r.pBE)}</td><td class="e">${pct(r.pMax)}</td></tr>`;
+            <td class="e">${isStreak() ? pct(r.pBE) : evText(r.ev)}</td><td class="e">${isBest ? '<span class="dim">—</span>' : isStreak() ? `${((r.pBE - st.rows[st.best].pBE) * 100).toFixed(1)}pt` : `−${diffText(r.diff)}`}</td>
+            <td class="e">${fmt(r.meanScore)}</td>${two ? `<td class="e">${pct(r.pBE)}</td><td class="e">${pct(r.pMax)}</td>` : ''}</tr>`;
         })
         .join('')}</tbody></table>${rows.length > 8 ? `<div class="hint" style="text-align:center">+${rows.length - 8} weaker moves</div>` : ''}`;
   }
@@ -529,12 +579,15 @@ function workerMain(scope) {
     let stays = '';
     for (let i = 0; i < R.stays; i++) stays += `<span class="staytok${i < G.staysLeft ? '' : ' used'}">STAY</span>`;
     const next = R.streakBase + R.streakInc * Math.max(0, G.streak - 1);
+    const sg = settings.streakGame;
+    const sub = isStreak() ? (G.score >= target() ? '<small class="s-success">✓ target</small>' : `<small>need ${fmt(target() - G.score)}</small>`) : `<small>${m.toFixed(2)}x</small>`;
     $('status').innerHTML = `<div class="pill" title="Busts">${hex}</div>
       <div class="pill" title="Stays left">${stays || '<small>no stays</small>'}</div>
-      <div class="pill" title="Score (payout on this curve)"><span class="chip"></span>${fmt(G.score)}<small>${m.toFixed(2)}x</small></div>`;
+      <div class="pill" title="Score"><span class="chip"></span>${fmt(G.score)}${sub}</div>`;
+    const where = isStreak() ? `Streak game ${sg.game + 1} of ${sg.targets.length} · target ${fmt(target())}` : `1x at ${fmt(BE)} · max at ${fmt(MAXS)}`;
     $('meta').innerHTML = G.streak
-      ? `<span class="s-accent">On a roll ×${G.streak}</span> · score this turn for +${next} · turn ${G.turn + 1}`
-      : `Turn ${G.turn + 1} · 1x at ${fmt(BE)} · max at ${fmt(MAXS)}`;
+      ? `<span class="s-accent">On a roll ×${G.streak}</span> · score this turn for +${next} · ${where}`
+      : `Turn ${G.turn + 1} · ${where}`;
   }
 
   const cardHtml = (label, extra) => `<div class="pc${extra || ''}"><span class="c">${label}</span><span class="b">${label}</span></div>`;
@@ -664,10 +717,31 @@ function workerMain(scope) {
 
   // ---------- payout inputs (change every game) ----------
   function renderPayoutInputs() {
+    const sg = settings.streakGame;
     $('pBE').value = settings.curve.be;
     $('p22').value = settings.curve.s22;
     $('p27').value = settings.curve.s27;
     $('pEntry').value = settings.entry || 10;
+    if (document.activeElement !== $('sTargets')) $('sTargets').value = sg.targets.join(', ');
+    $('sPayout').value = sg.payout;
+    for (const b of $('modeSeg').querySelectorAll('button')) b.classList.toggle('on', b.dataset.mode === settings.mode);
+    $('cashBox').style.display = isStreak() ? 'none' : '';
+    $('streakBox').style.display = isStreak() ? '' : 'none';
+    $('sSteps').innerHTML = sg.targets
+      .map(
+        (t, i) => `<button data-game="${i}" class="${i === sg.game ? 'on' : i < sg.game ? 'done' : ''}" title="Set the game you are on">
+          <small>${i < sg.game ? '✓ ' : ''}Game ${i + 1}${i === sg.game ? ' · now' : ''}</small><b>${fmt(t)}</b></button>`,
+      )
+      .join('');
+    for (const b of $('sSteps').querySelectorAll('button'))
+      b.onclick = () => {
+        sg.game = +b.dataset.game;
+        save(LS_SET, settings);
+        rebuildPayout();
+        renderPayoutInputs();
+        render();
+        analyze();
+      };
     $('payErr').textContent = '';
     renderEV();
   }
@@ -677,38 +751,50 @@ function workerMain(scope) {
     const s27 = Number($('p27').value);
     return be > 0 && s22 > be && s27 > s22 ? Object.assign({}, settings.curve, { be, s22, s27 }) : null;
   }
-  // Expected payout of a whole game on the entered curve, from games played start to finish with the advisor.
+  function readStreakInputs() {
+    const targets = $('sTargets').value.split(/[\s,]+/).filter(Boolean).map(Number);
+    const payout = Number($('sPayout').value);
+    return targets.length && targets.every((t) => t > 0) && payout > 0 ? { targets, payout } : null;
+  }
+  // Expected payout from games played start to finish with the advisor (sample of final scores).
   function renderEV() {
-    const c = readCurveInputs();
     const entry = Number($('pEntry').value) || 0;
-    if (!c || typeof ADVISOR_SCORES === 'undefined') {
-      $('evLine').innerHTML = '';
-      return;
-    }
+    if (typeof ADVISOR_SCORES === 'undefined') return;
     const xs = ADVISOR_SCORES;
-    let ev = 0;
-    let be = 0;
-    let m22 = 0;
-    let lost = 0;
-    for (const s of xs) {
-      if (s < 0) {
-        lost++;
-        continue;
-      }
-      ev += E.payout(s, c);
-      if (s >= c.be) be++;
-      if (s >= c.s22) m22++;
+    const n = xs.length;
+    const passRate = (t) => xs.filter((s) => s >= t).length / n;
+    const lostRate = xs.filter((s) => s < 0).length / n;
+    let ev;
+    let rows;
+    let label = 'Your EV this game';
+    if (isStreak()) {
+      const s = readStreakInputs();
+      if (!s) return void ($('evLine').innerHTML = '');
+      const from = Math.min(settings.streakGame.game, s.targets.length - 1);
+      let p = 1;
+      rows = s.targets.map((t, i) => {
+        const r = passRate(t);
+        if (i >= from) p *= r;
+        return [`Game ${i + 1} · beat ${fmt(t)}`, i < from ? '<span class="s-success">✓ done</span>' : `<span class="mono">${pct(r)}</span>`];
+      });
+      rows.push(['Win the streak', `<span class="mono">${pct(p)}</span> <span class="muted">× ${s.payout}x</span>`]);
+      ev = p * s.payout;
+      label = from > 0 ? `Your EV from game ${from + 1}` : 'Your EV this streak';
+    } else {
+      const c = readCurveInputs();
+      if (!c) return void ($('evLine').innerHTML = '');
+      ev = xs.reduce((a, s) => a + (s < 0 ? 0 : E.payout(s, c)), 0) / n;
+      rows = [
+        [`Reach ${fmt(c.be)} (1x)`, `<span class="mono">${pct(passRate(c.be))}</span>`],
+        [`Reach ${fmt(c.s22)} (2.2x)`, `<span class="mono">${pct(passRate(c.s22))}</span>`],
+      ];
     }
-    ev /= xs.length;
+    rows.push(['Lose on 3 busts', `<span class="mono">${pct(lostRate)}</span> <span class="muted">per game</span>`]);
+    rows.push(['Based on', `<span class="muted">${n} full games played with the advisor</span>`]);
     const money = (x) => '$' + x.toFixed(2);
-    $('evLine').innerHTML = `<div class="big${ev < 1 ? ' neg' : ''}"><small>Your EV this game</small><b class="${ev < 1 ? 's-error' : 's-success'}">${ev.toFixed(2)}x</b>
-        <small>${entry ? `${money(entry * ev)} back on ${money(entry)} · ${ev >= 1 ? '+' : '−'}${money(Math.abs(entry * (ev - 1)))} per game` : ''}</small></div>
-      ${kv([
-        [`Reach ${fmt(c.be)} (1x)`, `<span class="mono">${pct(be / xs.length)}</span>`],
-        [`Reach ${fmt(c.s22)} (2.2x)`, `<span class="mono">${pct(m22 / xs.length)}</span>`],
-        ['Lose on 3 busts', `<span class="mono">${pct(lost / xs.length)}</span>`],
-        ['Based on', `<span class="muted">${xs.length} full games played with the advisor</span>`],
-      ])}`;
+    $('evLine').innerHTML = `<div class="big${ev < 1 ? ' neg' : ''}"><small>${label}</small><b class="${ev < 1 ? 's-error' : 's-success'}">${ev.toFixed(2)}x</b>
+        <small>${entry ? `${money(entry * ev)} back on ${money(entry)} · ${ev >= 1 ? '+' : '−'}${money(Math.abs(entry * (ev - 1)))}` : ''}</small></div>
+      ${kv(rows)}`;
   }
   function applyPayoutInputs() {
     const entry = Number($('pEntry').value);
@@ -716,21 +802,34 @@ function workerMain(scope) {
       settings.entry = entry;
       save(LS_SET, settings);
     }
-    const c = readCurveInputs();
-    if (!c) {
-      $('payErr').textContent = 'Needs break even < 2.2x score < 2.7x score';
-      return;
-    }
     $('payErr').textContent = '';
-    renderEV();
-    if (c.be === settings.curve.be && c.s22 === settings.curve.s22 && c.s27 === settings.curve.s27) return;
-    settings.curve = c;
+    if (isStreak()) {
+      const s = readStreakInputs();
+      if (!s) {
+        $('payErr').textContent = 'Enter targets like 6350, 7751 and a payout above 0';
+        return;
+      }
+      const sg = settings.streakGame;
+      if (s.targets.join() === sg.targets.join() && s.payout === sg.payout) return renderEV();
+      sg.targets = s.targets;
+      sg.payout = s.payout;
+      sg.game = Math.min(sg.game, s.targets.length - 1);
+    } else {
+      const c = readCurveInputs();
+      if (!c) {
+        $('payErr').textContent = 'Needs break even < 2.2x score < 2.7x score';
+        return;
+      }
+      if (c.be === settings.curve.be && c.s22 === settings.curve.s22 && c.s27 === settings.curve.s27) return renderEV();
+      settings.curve = c;
+    }
     save(LS_SET, settings);
     rebuildPayout();
+    renderPayoutInputs();
     render();
     analyze();
   }
-  for (const id of ['pBE', 'p22', 'p27', 'pEntry']) {
+  for (const id of ['pBE', 'p22', 'p27', 'pEntry', 'sTargets', 'sPayout']) {
     $(id).addEventListener('input', renderEV);
     $(id).addEventListener('change', applyPayoutInputs);
     $(id).addEventListener('keydown', (e) => {
@@ -740,6 +839,16 @@ function workerMain(scope) {
       }
     });
   }
+  for (const b of $('modeSeg').querySelectorAll('button'))
+    b.onclick = () => {
+      if (settings.mode === b.dataset.mode) return;
+      settings.mode = b.dataset.mode;
+      save(LS_SET, settings);
+      rebuildPayout();
+      renderPayoutInputs();
+      render();
+      analyze();
+    };
 
   // ---------- dialogs ----------
   function openSettings() {
