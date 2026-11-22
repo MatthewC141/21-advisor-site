@@ -178,7 +178,10 @@ function workerMain(scope) {
     G.current = null;
     G.turn++;
     if (res.type === 1) toast(`${outcomeName(res.pts)}! +${res.pts}`, res.bonus ? `On a roll! +${res.bonus}` : '');
-    else if (res.type === 2) toast('Bust!', `${G.busts} of ${settings.rules.maxBusts}`, true);
+    else if (res.type === 2) {
+      const lost = G.busts >= settings.rules.maxBusts && settings.rules.bustOutLoses;
+      toast('Bust!', lost ? 'Game lost' : `${G.busts} of ${settings.rules.maxBusts}`, true);
+    }
     commit();
   }
 
@@ -424,9 +427,10 @@ function workerMain(scope) {
     p.className = 'panel advice';
     $('btnApplyMain').disabled = !recommended();
     if (isOver()) {
-      const m = E.payout(G.score, settings.curve);
+      const lost = G.busts >= R.maxBusts && R.bustOutLoses;
+      const m = lost ? 0 : E.payout(G.score, settings.curve);
       p.innerHTML = `<div class="ph">Game over</div>
-        <div class="move">${fmt(G.score)} points</div>
+        <div class="move">${lost ? 'Lost on busts' : fmt(G.score) + ' points'}</div>
         <div class="res ${m >= 1 ? 's-success' : 's-error'}">${m.toFixed(2)}x your entry</div>
         ${kv([['Ended by', G.busts >= R.maxBusts ? `${R.maxBusts} busts` : 'all 52 cards played']])}
         <div class="row" style="margin-top:12px"><button class="btn gold sm" id="btnNew2">New game</button></div>`;
@@ -561,8 +565,10 @@ function workerMain(scope) {
   let lastCount = [0, 0, 0, 0];
   function renderBoard() {
     const rec = recommended();
+    const done = !!(rec && cur && !cur.running);
     const S = stateS();
     const can = G.current && !isOver();
+    renderTableStatus(rec, done);
     $('board').innerHTML = G.cols
       .map((cards, c) => {
         let preview = '';
@@ -579,15 +585,15 @@ function workerMain(scope) {
           } else preview = '→ ' + totalText(ctx.T.nextCode[idx]);
         }
         const isRec = rec && rec.col === c;
-        const isStay = rec && rec.stay === c;
+        const isStay = done && rec.stay === c;
         const code = colCode(cards);
         const soft = cards.length && (code >> 5) & 1 && (code & 31) + 10 <= 21;
         const fresh = cards.length > lastCount[c];
         const stack = cards.map((x, i) => cardHtml(x.label, fresh && i === cards.length - 1 ? ' new' : '')).join('');
-        return `<div class="col${isRec ? ' rec' : ''}">
+        return `<div class="col${isRec ? (done ? ' go' : ' lean') : ''}">
           <div class="tot">${cards.length ? E.bestTotal(code) : 0}${soft ? '<small>SOFT</small>' : ''}</div>
           <div class="lane${can ? ' can' : ''}" data-place="${c}" title="${can ? 'Place here (Shift+' + (c + 1) + ')' : ''}">${stack}
-            ${isRec ? '<div class="arrow"></div>' : ''}<div class="preview${pcls}">${preview}</div></div>
+            ${isRec && done ? '<div class="arrow"></div>' : ''}<div class="preview${pcls}">${preview}</div></div>
           <button class="stay${isStay ? ' hot' : ''}" data-stay="${c}" ${G.staysLeft > 0 && cards.length && !isOver() ? '' : 'disabled'}>STAY</button>
         </div>`;
       })
@@ -595,6 +601,28 @@ function workerMain(scope) {
     lastCount = G.cols.map((x) => x.length);
     for (const b of $('board').querySelectorAll('[data-place]')) b.onclick = () => place(+b.dataset.place, -1);
     for (const b of $('board').querySelectorAll('[data-stay]')) b.onclick = () => stay(+b.dataset.stay);
+  }
+
+  // Big status pill on the table: thinking progress, then the move in green once simulations stop.
+  function renderTableStatus(rec, done) {
+    const el = $('tableStatus');
+    if (isOver()) {
+      el.className = 'tstatus';
+      el.innerHTML = '<span>Game over</span>';
+    } else if (!G.current) {
+      el.className = 'tstatus';
+      el.innerHTML = '<span>Waiting for next card</span>';
+    } else if (!done) {
+      const prog = cur ? Math.min(1, (performance.now() - cur.t0) / cur.budget) : 0;
+      el.className = 'tstatus think';
+      el.innerHTML = `<div class="fill" style="width:${(prog * 100).toFixed(1)}%"></div><span>Thinking… ${Math.round(prog * 100)}%</span>`;
+    } else if (rec.stay >= 0) {
+      el.className = 'tstatus stay';
+      el.innerHTML = `<span>✓ Stay ${rec.stay + 1}, then place on ${rec.col + 1}</span>`;
+    } else {
+      el.className = 'tstatus go';
+      el.innerHTML = `<span>✓ Place on column ${rec.col + 1}</span>`;
+    }
   }
 
   function renderDeck() {
@@ -638,25 +666,71 @@ function workerMain(scope) {
     $('pBE').value = settings.curve.be;
     $('p22').value = settings.curve.s22;
     $('p27').value = settings.curve.s27;
+    $('pEntry').value = settings.entry || 10;
     $('payErr').textContent = '';
+    renderEV();
   }
-  function applyPayoutInputs() {
+  function readCurveInputs() {
     const be = Number($('pBE').value);
     const s22 = Number($('p22').value);
     const s27 = Number($('p27').value);
-    if (!(be > 0 && s22 > be && s27 > s22)) {
+    return be > 0 && s22 > be && s27 > s22 ? Object.assign({}, settings.curve, { be, s22, s27 }) : null;
+  }
+  // Expected payout of a whole game on the entered curve, from games played start to finish with the advisor.
+  function renderEV() {
+    const c = readCurveInputs();
+    const entry = Number($('pEntry').value) || 0;
+    if (!c || typeof ADVISOR_SCORES === 'undefined') {
+      $('evLine').innerHTML = '';
+      return;
+    }
+    const xs = ADVISOR_SCORES;
+    let ev = 0;
+    let be = 0;
+    let m22 = 0;
+    let lost = 0;
+    for (const s of xs) {
+      if (s < 0) {
+        lost++;
+        continue;
+      }
+      ev += E.payout(s, c);
+      if (s >= c.be) be++;
+      if (s >= c.s22) m22++;
+    }
+    ev /= xs.length;
+    const money = (x) => '$' + x.toFixed(2);
+    $('evLine').innerHTML = `<div class="big${ev < 1 ? ' neg' : ''}"><small>Your EV this game</small><b class="${ev < 1 ? 's-error' : 's-success'}">${ev.toFixed(2)}x</b>
+        <small>${entry ? `${money(entry * ev)} back on ${money(entry)} · ${ev >= 1 ? '+' : '−'}${money(Math.abs(entry * (ev - 1)))} per game` : ''}</small></div>
+      ${kv([
+        [`Reach ${fmt(c.be)} (1x)`, `<span class="mono">${pct(be / xs.length)}</span>`],
+        [`Reach ${fmt(c.s22)} (2.2x)`, `<span class="mono">${pct(m22 / xs.length)}</span>`],
+        ['Lose on 3 busts', `<span class="mono">${pct(lost / xs.length)}</span>`],
+        ['Based on', `<span class="muted">${xs.length} full games played with the advisor</span>`],
+      ])}`;
+  }
+  function applyPayoutInputs() {
+    const entry = Number($('pEntry').value);
+    if (entry >= 0 && entry !== settings.entry) {
+      settings.entry = entry;
+      save(LS_SET, settings);
+    }
+    const c = readCurveInputs();
+    if (!c) {
       $('payErr').textContent = 'Needs break even < 2.2x score < 2.7x score';
       return;
     }
     $('payErr').textContent = '';
-    if (be === settings.curve.be && s22 === settings.curve.s22 && s27 === settings.curve.s27) return;
-    Object.assign(settings.curve, { be, s22, s27 });
+    renderEV();
+    if (c.be === settings.curve.be && c.s22 === settings.curve.s22 && c.s27 === settings.curve.s27) return;
+    settings.curve = c;
     save(LS_SET, settings);
     rebuildPayout();
     render();
     analyze();
   }
-  for (const id of ['pBE', 'p22', 'p27']) {
+  for (const id of ['pBE', 'p22', 'p27', 'pEntry']) {
+    $(id).addEventListener('input', renderEV);
     $(id).addEventListener('change', applyPayoutInputs);
     $(id).addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {

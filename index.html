@@ -63,12 +63,23 @@
   .tot { height: 58px; border-radius: 12px; display: grid; place-items: center; font-size: 26px; font-weight: 800;
     background: rgba(255,255,255,.07); box-shadow: inset 0 0 0 2px rgba(255,255,255,.14); position: relative; }
   .tot small { position: absolute; bottom: 3px; font-size: 9px; font-weight: 700; letter-spacing: .08em; color: var(--gold-1); }
-  .col.rec .tot { box-shadow: inset 0 0 0 2px var(--gold-2), 0 0 18px rgba(247,197,72,.45); }
+  .col.go .tot { background: rgba(71,224,127,.28); box-shadow: inset 0 0 0 3px var(--green), 0 0 22px rgba(71,224,127,.6); }
   .lane { min-height: 270px; border-radius: 10px; padding: 6px 5px 40px; position: relative; display: flex; flex-direction: column;
     background: linear-gradient(rgba(255,255,255,.05), rgba(255,255,255,.02)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.07); }
   .lane.can { cursor: pointer; }
   .lane.can:hover { background: linear-gradient(rgba(255,255,255,.10), rgba(255,255,255,.04)); }
-  .col.rec .lane { box-shadow: inset 0 0 0 2px rgba(247,197,72,.8), 0 0 22px rgba(247,197,72,.25); }
+  .col.lean .lane { box-shadow: inset 0 0 0 2px rgba(255,255,255,.28); outline: 2px dashed rgba(247,197,72,.55); outline-offset: -2px; }
+  .col.go .lane { background: linear-gradient(rgba(71,224,127,.30), rgba(71,224,127,.12)); box-shadow: inset 0 0 0 3px var(--green), 0 0 26px rgba(71,224,127,.55);
+    animation: glow 1.2s ease-in-out infinite; }
+  @keyframes glow { 50% { box-shadow: inset 0 0 0 3px var(--green), 0 0 40px rgba(71,224,127,.85); } }
+  .tstatus { margin: 12px auto 0; height: 40px; border-radius: 999px; position: relative; overflow: hidden; display: grid; place-items: center;
+    font: italic 900 16px var(--font); letter-spacing: .03em; text-transform: uppercase; background: rgba(0,0,0,.35); color: var(--muted); }
+  .tstatus .fill { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, rgba(247,197,72,.25), rgba(247,197,72,.5)); transition: width .15s; }
+  .tstatus span { position: relative; }
+  .tstatus.think { color: var(--gold-1); }
+  .tstatus.think span { animation: blink 1s ease-in-out infinite; }
+  .tstatus.go { background: linear-gradient(180deg, #6ff0a0, #22b35a); color: #053b1a; box-shadow: 0 0 24px rgba(71,224,127,.6); }
+  .tstatus.stay { background: linear-gradient(180deg, #ffd27a, var(--warn)); color: #4a2a00; box-shadow: 0 0 24px rgba(255,176,46,.6); }
   .arrow { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); width: 46px; height: 70px; opacity: .9;
     background: linear-gradient(180deg, rgba(71,224,127,.95), rgba(71,224,127,.15)); animation: bob 1s ease-in-out infinite;
     clip-path: polygon(50% 0, 100% 40%, 68% 40%, 68% 100%, 32% 100%, 32% 40%, 0 40%); }
@@ -151,6 +162,12 @@
   .pin { display: flex; align-items: center; border-radius: 12px; background: rgba(255,255,255,.07); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
   .pin span { padding: 0 10px; font: italic 800 13px var(--font); color: #3d2600; background: linear-gradient(180deg, var(--gold-1), var(--gold-2)); height: 38px; display: grid; place-items: center; }
   .pin input { width: 90px; height: 38px; border: 0; background: transparent; color: #fff; font: 800 17px var(--font); padding: 0 10px; outline: none; }
+  .ev { margin-top: 12px; display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
+  .ev .big { padding: 8px 16px; border-radius: 14px; background: rgba(71,224,127,.14); box-shadow: inset 0 0 0 2px rgba(71,224,127,.6); }
+  .ev .big.neg { background: rgba(255,90,95,.14); box-shadow: inset 0 0 0 2px rgba(255,90,95,.6); }
+  .ev .big b { display: block; font: italic 900 30px/1.1 var(--font); }
+  .ev .big small { color: var(--muted); font-size: 12px; font-weight: 600; }
+  .ev .kv { align-content: center; }
   .pin:focus-within { box-shadow: inset 0 0 0 2px var(--gold-2); }
 
   table { width: 100%; border-collapse: separate; border-spacing: 0 4px; font-size: 13px; }
@@ -223,6 +240,7 @@
     <div class="logo"><span class="big">21</span><span class="sub">ADVISOR</span></div>
     <div class="meta" id="meta"></div>
     <div class="board" id="board"></div>
+    <div class="tstatus" id="tableStatus"></div>
     <div class="draw">
       <div class="back" title="Unseen cards"><b id="deckTotal"></b></div>
       <div id="curCard" class="slot"></div>
@@ -249,9 +267,11 @@
         <label class="pin"><span>1x</span><input id="pBE" type="number" min="0" step="1"></label>
         <label class="pin"><span>2.2x</span><input id="p22" type="number" min="0" step="1"></label>
         <label class="pin"><span>2.7x</span><input id="p27" type="number" min="0" step="1"></label>
+        <label class="pin"><span>Entry $</span><input id="pEntry" type="number" min="0" step="0.01"></label>
       </div>
-      <div class="hint" style="margin-top:6px">Exponential between those scores, flat at 2.7x above the max. Below break even it falls gently, fitted to your game where 6,350 paid 0.988x against a 6,500 break even.</div>
+      <div class="hint" style="margin-top:6px">Exponential between those scores, flat at 2.7x above the max. Below break even the curve is fitted to your games (6,350 paid 0.988x, 5,700 paid 0.766x). The third bust loses the game outright (0x).</div>
       <div class="err" id="payErr"></div>
+      <div class="ev" id="evLine"></div>
     </div>
 
     <div class="panel advice" id="recPanel"></div>
@@ -305,6 +325,7 @@
         <label class="field"><span>Streak step</span><input name="streakInc" type="number"></label>
         <label class="field"><span>Busts to end</span><input name="maxBusts" type="number" min="1"></label>
         <label class="field"><span>Stays per game</span><input name="stays" type="number" min="0"></label>
+        <label class="field"><span>Last bust</span><select name="bustOutLoses"><option value="1">Loses the game (0x)</option><option value="0">Ends it, keeps score</option></select></label>
       </div>
       <span class="hint">The streak bonus is paid when a column scores on the turn right after another scoring turn; each further turn in a row adds the
         step. The fast policy was trained on the defaults (400 / 600 / 800 / 1000, +250); the simulations always use the rules here.</span>
@@ -350,6 +371,7 @@
 
 <script src="engine.js"></script>
 <script src="params.js"></script>
+<script src="advisor-scores.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

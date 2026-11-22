@@ -18,6 +18,7 @@ function EngineFactory() {
     streakInc: 0, // extra bonus per further consecutive scoring turn
     maxBusts: 3,
     stays: 2,
+    bustOutLoses: 1, // 1 = the bust that ends the game also forfeits the score (payout 0)
   };
 
   function bucketOf(left) {
@@ -134,6 +135,7 @@ function EngineFactory() {
     S[6] = 0;
     if (t === 2) {
       S[4]++;
+      if (S[4] >= ctx.maxBusts && ctx.rules.bustOutLoses) S[7] = 0;
       S[c] = 0;
       return { type: 2, pts: 0, bonus: 0 };
     }
@@ -160,6 +162,7 @@ function EngineFactory() {
       S[6] = 0;
       if (t === 2) {
         S[4]++;
+        if (S[4] >= ctx.maxBusts && ctx.rules.bustOutLoses) S[7] = 0;
         S[c] = 0;
       } else S[c] = ctx.T.nextCode[idx];
     }
@@ -178,7 +181,8 @@ function EngineFactory() {
     const staysLeft = S[5];
     const lives = ctx.maxBusts - busts - 1;
     const li = lives >= 2 ? 2 : lives < 0 ? 0 : lives;
-    const bustPen = P.Ba[li] * left + P.Bb[li];
+    // The game-ending bust also throws away the points banked so far when bustOutLoses is on.
+    const bustPen = P.Ba[li] * left + P.Bb[li] + (lives <= 0 && ctx.rules.bustOutLoses ? S[7] : 0);
     const stayPen = P.Sa * left + P.Sb;
     const nextBonus = ctx.bonus[S[6] < MAX_STREAK ? S[6] + 1 : MAX_STREAK];
     const covS = P.wCovS;
@@ -322,15 +326,20 @@ function EngineFactory() {
   // ---- payout curve ----
   // The game states three scores: break even (1x), the 2.2x score and the max (2.7x) score.
   // Exponential through (be, 1) and (s22, 2.2); exponential again from (s22, 2.2) to (s27, 2.7);
-  // flat at the max beyond. Below break even it decays more gently, at `low` per (s22 - be) points:
-  // fitted to an observed game (be 6500, s22 10717: score 6350 paid 0.988x).
-  const LOW_RATE = -Math.log(0.988) / (150 / (10717 - 6500));
-  const DEFAULT_CURVE = { be: 4700, s22: 7823, s27: 7900, m22: 2.2, m27: 2.7, low: LOW_RATE };
+  // flat at the max beyond. Below break even: m = exp(-LOW_A * x^LOW_P) with x = (be - score) / (s22 - be),
+  // fitted exactly to two observed games.
+  const OBS = [
+    { be: 6500, s22: 10717, score: 6350, mult: 0.988 },
+    { be: 6500, s22: 9220, score: 5700, mult: 0.766 },
+  ].map((o) => ({ x: (o.be - o.score) / (o.s22 - o.be), y: -Math.log(o.mult) }));
+  const LOW_P = Math.log(OBS[1].y / OBS[0].y) / Math.log(OBS[1].x / OBS[0].x);
+  const LOW_A = OBS[1].y / Math.pow(OBS[1].x, LOW_P);
+  const DEFAULT_CURVE = { be: 4700, s22: 7823, s27: 7900, m22: 2.2, m27: 2.7 };
   function payout(score, c) {
     if (score >= c.s27) return c.m27;
     if (score >= c.s22) return c.m22 * Math.pow(c.m27 / c.m22, (score - c.s22) / (c.s27 - c.s22));
     if (score >= c.be) return Math.pow(c.m22, (score - c.be) / (c.s22 - c.be));
-    return Math.exp((-(c.low || LOW_RATE) * (c.be - score)) / (c.s22 - c.be));
+    return Math.exp(-LOW_A * Math.pow((c.be - score) / (c.s22 - c.be), LOW_P));
   }
 
   return {
