@@ -469,6 +469,7 @@ function workerMain(scope) {
     const v = verdict(st);
     if (best.stay >= 0) p.classList.add('staying');
     p.innerHTML = `<div class="ph">Best move <span class="badge s-${v[1]}"><span class="dot"></span>${v[0]}</span></div>
+      ${best.stay >= 0 ? `<div class="stayflag">STAY FIRST — column ${best.stay + 1}</div>` : ''}
       <div class="move">${esc(describeMove(best))}</div>
       <div class="res ${rtone ? 's-' + rtone : 'muted'}">${esc(rt)}</div>
       ${kv([
@@ -504,7 +505,7 @@ function workerMain(scope) {
         .map((r) => {
           const [rt, tone] = resultOf(r);
           const isBest = r.j === st.best;
-          return `<tr class="${isBest ? 'sel' : ''}"><td>${esc(describeMove(r))}<br><span class="${tone ? 's-' + tone : 'muted'}" style="font-size:12px">${esc(rt)}</span></td>
+          return `<tr class="${isBest ? 'sel' : ''}"><td>${r.stay >= 0 ? '<b class="staytag">STAY</b> ' : ''}${esc(describeMove(r))}<br><span class="${tone ? 's-' + tone : 'muted'}" style="font-size:12px">${esc(rt)}</span></td>
             <td class="e">${evText(r.ev)}</td><td class="e">${isBest ? '<span class="dim">—</span>' : `−${diffText(r.diff)}`}</td>
             <td class="e">${fmt(r.meanScore)}</td><td class="e">${pct(r.pBE)}</td><td class="e">${pct(r.pMax)}</td></tr>`;
         })
@@ -593,7 +594,7 @@ function workerMain(scope) {
         return `<div class="col${isRec ? (done ? ' go' : ' lean') : ''}">
           <div class="tot">${cards.length ? E.bestTotal(code) : 0}${soft ? '<small>SOFT</small>' : ''}</div>
           <div class="lane${can ? ' can' : ''}" data-place="${c}" title="${can ? 'Place here (Shift+' + (c + 1) + ')' : ''}">${stack}
-            ${isRec && done ? '<div class="arrow"></div>' : ''}<div class="preview${pcls}">${preview}</div></div>
+            ${isRec && done ? '<div class="arrow"></div>' : ''}${isStay ? '<div class="stayover">STAY<small>first</small></div>' : ''}<div class="preview${pcls}">${preview}</div></div>
           <button class="stay${isStay ? ' hot' : ''}" data-stay="${c}" ${G.staysLeft > 0 && cards.length && !isOver() ? '' : 'disabled'}>STAY</button>
         </div>`;
       })
@@ -618,7 +619,7 @@ function workerMain(scope) {
       el.innerHTML = `<div class="fill" style="width:${(prog * 100).toFixed(1)}%"></div><span>Thinking… ${Math.round(prog * 100)}%</span>`;
     } else if (rec.stay >= 0) {
       el.className = 'tstatus stay';
-      el.innerHTML = `<span>✓ Stay ${rec.stay + 1}, then place on ${rec.col + 1}</span>`;
+      el.innerHTML = `<span><b>STAY column ${rec.stay + 1} first</b> → then place on ${rec.col + 1}</span>`;
     } else {
       el.className = 'tstatus go';
       el.innerHTML = `<span>✓ Place on column ${rec.col + 1}</span>`;

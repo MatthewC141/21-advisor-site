@@ -325,20 +325,23 @@ function EngineFactory() {
 
   // ---- payout curve ----
   // The game states three scores: break even (1x), the 2.2x score and the max (2.7x) score.
-  // Exponential through (be, 1) and (s22, 2.2); exponential again from (s22, 2.2) to (s27, 2.7);
-  // flat at the max beyond. Below break even: m = exp(-LOW_A * x^LOW_P) with x = (be - score) / (s22 - be),
-  // fitted exactly to two observed games.
-  const OBS = [
+  // Between anchors: m = m0 + (m1 - m0) * x^HIGH_Q, x = position between the two anchor scores (0..1);
+  // flat at the max beyond. Below break even: m = exp(-LOW_A * x^LOW_P), x = (be - score) / (s22 - be).
+  // Both shapes are fitted exactly to observed games.
+  const OBS_LOW = [
     { be: 6500, s22: 10717, score: 6350, mult: 0.988 },
     { be: 6500, s22: 9220, score: 5700, mult: 0.766 },
   ].map((o) => ({ x: (o.be - o.score) / (o.s22 - o.be), y: -Math.log(o.mult) }));
-  const LOW_P = Math.log(OBS[1].y / OBS[0].y) / Math.log(OBS[1].x / OBS[0].x);
-  const LOW_A = OBS[1].y / Math.pow(OBS[1].x, LOW_P);
+  const LOW_P = Math.log(OBS_LOW[1].y / OBS_LOW[0].y) / Math.log(OBS_LOW[1].x / OBS_LOW[0].x);
+  const LOW_A = OBS_LOW[1].y / Math.pow(OBS_LOW[1].x, LOW_P);
+  const OBS_HIGH = { be: 6500, s22: 9133, score: 7600, mult: 1.458 };
+  const HIGH_Q =
+    Math.log((OBS_HIGH.mult - 1) / (2.2 - 1)) / Math.log((OBS_HIGH.score - OBS_HIGH.be) / (OBS_HIGH.s22 - OBS_HIGH.be));
   const DEFAULT_CURVE = { be: 4700, s22: 7823, s27: 7900, m22: 2.2, m27: 2.7 };
   function payout(score, c) {
     if (score >= c.s27) return c.m27;
-    if (score >= c.s22) return c.m22 * Math.pow(c.m27 / c.m22, (score - c.s22) / (c.s27 - c.s22));
-    if (score >= c.be) return Math.pow(c.m22, (score - c.be) / (c.s22 - c.be));
+    if (score >= c.s22) return c.m22 + (c.m27 - c.m22) * Math.pow((score - c.s22) / (c.s27 - c.s22), HIGH_Q);
+    if (score >= c.be) return 1 + (c.m22 - 1) * Math.pow((score - c.be) / (c.s22 - c.be), HIGH_Q);
     return Math.exp(-LOW_A * Math.pow((c.be - score) / (c.s22 - c.be), LOW_P));
   }
 

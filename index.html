@@ -149,6 +149,14 @@
   .advice .move { font: italic 900 24px/1.15 var(--font); margin: 2px 0 4px;
     background: linear-gradient(180deg, #fff, var(--gold-1)); -webkit-background-clip: text; background-clip: text; color: transparent; }
   .advice.staying .move { background: linear-gradient(180deg, #fff, var(--warn)); -webkit-background-clip: text; background-clip: text; }
+  .stayflag { display: inline-block; margin: 2px 0 6px; padding: 6px 14px; border-radius: 10px; font: italic 900 22px var(--font); letter-spacing: .02em;
+    color: #3a2000; background: linear-gradient(180deg, #ffd27a, var(--warn)); box-shadow: 0 0 18px rgba(255,176,46,.5); }
+  .staytag { font: italic 900 12px var(--font); color: #3a2000; background: var(--warn); padding: 1px 6px; border-radius: 6px; }
+  .stayover { position: absolute; left: 4px; right: 4px; top: 38%; text-align: center; z-index: 2; padding: 6px 0; border-radius: 10px;
+    font: italic 900 24px/1 var(--font); color: #3a2000; background: linear-gradient(180deg, #ffd27a, var(--warn)); box-shadow: 0 0 20px rgba(255,176,46,.7);
+    animation: pulse .8s ease-in-out infinite; pointer-events: none; }
+  .stayover small { display: block; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+  .tstatus.stay b { font-weight: 900; text-decoration: underline; }
   .advice .res { font-weight: 700; margin-bottom: 10px; }
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 13px; }
   .kv .k { color: var(--muted); }
@@ -269,7 +277,7 @@
         <label class="pin"><span>2.7x</span><input id="p27" type="number" min="0" step="1"></label>
         <label class="pin"><span>Entry $</span><input id="pEntry" type="number" min="0" step="0.01"></label>
       </div>
-      <div class="hint" style="margin-top:6px">Exponential between those scores, flat at 2.7x above the max. Below break even the curve is fitted to your games (6,350 paid 0.988x, 5,700 paid 0.766x). The third bust loses the game outright (0x).</div>
+      <div class="hint" style="margin-top:6px">Curve fitted to your games: 7,600 paid 1.458x, 6,350 paid 0.988x, 5,700 paid 0.766x. Flat at 2.7x above the max; the third bust loses the game outright (0x).</div>
       <div class="err" id="payErr"></div>
       <div class="ev" id="evLine"></div>
     </div>
