@@ -1382,9 +1382,10 @@ function workerMain(scope) {
     if (be === c.be && s22 === c.s22 && s27 === c.s27) return Object.assign({}, c);
     return { be, s22, s27, m22: c.m22, m27: c.m27 };
   }
-  // Payout graph read off the game screen (cash mode): its three scores plus every gridline point.
-  function applyScreenCurve(r) {
-    if (settings.curve.pts && JSON.stringify(settings.curve.pts) === JSON.stringify(r.pts)) return;
+  // Payout graph read off the game screen (cash mode): its three scores plus every gridline point. force = the
+  // Scan button: apply and confirm even when it's the graph already in use.
+  function applyScreenCurve(r, force) {
+    if (!force && settings.curve.pts && JSON.stringify(settings.curve.pts) === JSON.stringify(r.pts)) return;
     settings.curve = Object.assign({}, E.DEFAULT_CURVE, { be: r.be, s22: r.s22, s27: r.s27, pts: r.pts, readAt: Date.now() });
     save(LS_SET, settings);
     rebuildPayout();
@@ -1393,6 +1394,21 @@ function workerMain(scope) {
     analyze();
     toast('Payout curve read', `1x ${fmt(r.be)} · 2.2x ${fmt(r.s22)} · 2.7x ${fmt(r.s27)}`);
   }
+  $('btnScanPay').onclick = async () => {
+    const b = $('btnScanPay');
+    b.disabled = true;
+    b.textContent = 'Scanning…';
+    const res = await Vision.scanPayout();
+    b.disabled = false;
+    b.textContent = 'Scan payout graph';
+    if (res.curve) return applyScreenCurve(res.curve, true);
+    const why = {
+      receiver: ['Receiver not connected', 'Start 21 Advisor Receiver, then use the advisor through it (the iPhone panel)'],
+      phone: ['iPhone not mirroring', 'Control Center → Screen Mirroring → 21 Advisor'],
+      screen: ['Payout graph not found', 'Open the Blitz payout screen on the phone (the graph with Break Even), then scan again'],
+    }[res.reason];
+    toast(why[0], why[1], true);
+  };
   function readStreakInputs() {
     const targets = $('sTargets').value.split(/[\s,]+/).filter(Boolean).map(Number);
     const payout = Number($('sPayout').value);

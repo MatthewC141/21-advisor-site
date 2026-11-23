@@ -473,14 +473,21 @@ const Vision = (function () {
     return { be: rows[be].score, s22: rows[k22].score, s27: rows[0].score, pts };
   }
 
+  // One look at the payout screen: the parsed curve, or null (not on screen, or the screen was still moving).
+  function readPayout() {
+    if (!worker || !phone || !live) return Promise.resolve(null);
+    const id = ++grabSeq;
+    return new Promise((res) => {
+      grabs.set(id, (a, b) => res(a && b && a.every((g, i) => mad(g, b[i]) < MOTION) ? parsePayout(b) : null));
+      worker.postMessage({ cmd: 'grab', id, rois: PAY_ROIS, delay: 0, gap: 300 });
+    });
+  }
+
   function maybeReadPayout() {
     if (payBusy || !phone || !live || !opts.wantPayout() || ++payTick % PAY_EVERY) return;
     payBusy = true;
-    const id = ++grabSeq;
-    grabs.set(id, (a, b) => {
+    readPayout().then((curve) => {
       payBusy = false;
-      if (!a || !b || !a.every((g, i) => mad(g, b[i]) < MOTION)) return;
-      const curve = parsePayout(b);
       if (!curve) return;
       const key = JSON.stringify(curve.pts);
       if (key === lastPay) return;
@@ -488,7 +495,22 @@ const Vision = (function () {
       note(`payout screen: 1x ${curve.be} · 2.2x ${curve.s22} · 2.7x ${curve.s27}`);
       opts.onPayout(curve);
     });
-    worker.postMessage({ cmd: 'grab', id, rois: PAY_ROIS, delay: 0, gap: 300 });
+  }
+
+  // The "Scan payout graph" button: a few looks over about 2 s, so a screen that is still settling is read too.
+  // {curve} on success, else {reason}.
+  async function scanPayout() {
+    if (!worker || !phone) return { reason: 'receiver' };
+    if (!live) return { reason: 'phone' };
+    for (let i = 0; i < 4; i++) {
+      const curve = await readPayout();
+      if (curve) {
+        lastPay = JSON.stringify(curve.pts);
+        note(`payout screen (scan): 1x ${curve.be} · 2.2x ${curve.s22} · 2.7x ${curve.s27}`);
+        return { curve };
+      }
+    }
+    return { reason: 'screen' };
   }
 
   function note(text) {
@@ -829,5 +851,5 @@ const Vision = (function () {
 
   const boardOn = () => !!(worker && phone && live && saved.board);
 
-  return { init, learn, rearm, learnedAll, readBoard, learnNumber, learnSlot, settleLearning, calibrateBusts, boardOn, active: () => !!worker };
+  return { init, learn, rearm, learnedAll, readBoard, learnNumber, learnSlot, settleLearning, calibrateBusts, scanPayout, boardOn, active: () => !!worker };
 })();
