@@ -538,7 +538,10 @@ const Vision = (function () {
     const m = classify(g);
     // Until every card is learned, an unknown card can look like a known one: demand a closer match then.
     const thr = learnedAll() ? saved.thr : Math.max(saved.thr, 0.9);
-    const face = m.best && m.best.c >= thr ? m.best.f : null;
+    // A near tie with a different rank (a 2 against a 3 in a small corner box) is treated as unknown: asking once,
+    // and learning that exact image, beats a confident misread.
+    const close = m.second && m.best.c - m.second.c < 0.05 && m.best.f !== EMPTY && m.second.f !== EMPTY && rankOf(m.best.f) !== rankOf(m.second.f);
+    const face = m.best && m.best.c >= thr && !close ? m.best.f : null;
     boxFace = face === EMPTY ? null : face;
     if (accepted && mad(g, accepted) > CHANGE) changed = true;
     if (face !== acceptedFace) left = true;
@@ -887,5 +890,7 @@ const Vision = (function () {
     active: () => !!worker,
     boxFace: () => boxFace, // card recognised in the box right now (null: none, unknown or not learned)
     tab: TAB,
+    eventImage: () => eventGray, // the image behind the last card event
+    lastImage: () => last, // the newest sample of the card box
   };
 })();

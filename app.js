@@ -255,10 +255,11 @@ function workerMain(scope) {
     commit();
     if (askColumn) {
       // the move the board couldn't show was just placed by hand: now the waiting card comes in
-      const f = askColumn.face;
+      const { face: f, img } = askColumn;
       askColumn = null;
       enterCard(f);
       autoCard = G.current;
+      cardImg = { card: G.current, img };
     }
   }
 
@@ -699,12 +700,12 @@ function workerMain(scope) {
     commit();
   }
 
-  // In a game = the box shows a known card. Once every card is learned, anything else is a menu, lobby or
-  // results screen and is ignored; until then unknown images are asked about so they can be taught.
+  // In a game = the box shows a known card. Once every card is learned, an unknown image outside a game (menu, lobby,
+  // results) is ignored; during a game, or while cards are still being learned, it is asked about.
   function onSeen(face, first) {
     if (first && G.current && G.current.label === face) return; // capture started on a card already entered
     if (!face) {
-      if (Vision.learnedAll()) {
+      if (Vision.learnedAll() && (!G.current || isOver())) {
         quietUnknown = true;
         return;
       }
@@ -744,16 +745,19 @@ function workerMain(scope) {
   // board only changes by the move seen on the mirrored board; otherwise (a shared window, board check off) the
   // advised move is assumed and checked afterwards.
   function nextCardShown(face) {
-    if (G.current && !isOver() && Vision.boardOn()) return observeMove(face);
+    const img = Vision.eventImage(); // what the reader saw, to teach it if the board later shows another card
+    if (G.current && !isOver() && Vision.boardOn()) return observeMove(face, img);
     advance();
     enterCard(face);
     autoCard = G.current;
+    cardImg = { card: G.current, img };
     checkBoard();
   }
 
   // ---------- the move you made, read off the board ----------
-  let observing = null; // {face}: the next card waits while the move just made is read off the board
-  let askColumn = null; // {face}: the move couldn't be read; the next column you place on (click, Shift+1-4) is it
+  let observing = null; // {face, img}: the next card waits while the move just made is read off the board
+  let askColumn = null; // {face, img}: the move couldn't be read; the next column you place on (click, Shift+1-4) is it
+  let cardImg = null; // {card, img}: the reader's image of the current card
 
   // The legal move of the current card (or, if none fits, of a misread card) that turns the advisor's board into the
   // screen's. Several moves can look alike while digits are still being learned: then the advised one if it is
@@ -778,28 +782,35 @@ function workerMain(scope) {
 
   // Places the resolved move (for the strategy record against the advice standing now) and, if a next card is
   // waiting, enters it; then lines the columns up with the screen.
-  function applyObserved({ a, misread }, r, face) {
+  function applyObserved({ a, misread }, r, face, img) {
     if (cur && cur.chunks.length) cur.stats = computeStats();
     const rec = misread ? null : recommended(); // advice for a misread card proves nothing
     if (misread) {
       toast('Card corrected', `that card was a ${E.RANK_LABELS[a.r]}, not ${G.current.label}`);
+      // Teach the card reader what this card really was (10-value cards only when the board named the face).
+      const placed = r.cols[a.col] && r.cols[a.col].slots[r.cols[a.col].n - 1];
+      const label = a.r < 9 ? E.RANK_LABELS[a.r] : placed && placed.label && faceRank(placed.label) === 9 ? placed.label : null;
+      if (label && cardImg && cardImg.card === G.current) Vision.learn(label, cardImg.img);
       G.deck[G.current.r]++;
       G.deck[a.r]--;
-      G.current = { r: a.r, label: E.RANK_LABELS[a.r] };
+      G.current = { r: a.r, label: label || E.RANK_LABELS[a.r] };
     }
     place(a.col, a.stay, rec);
     if (!face) return;
     enterCard(face);
     autoCard = G.current;
+    cardImg = { card: G.current, img };
     judgeBoard(r, null, false);
   }
 
-  async function observeMove(face) {
+  async function observeMove(face, img) {
     if (observing) {
-      observing.face = face; // played again while the first move was being read: the newest card is current
+      // played again while the first move was being read: the newest card is current
+      observing.face = face;
+      observing.img = img;
       return;
     }
-    observing = { face };
+    observing = { face, img };
     const seq = ++boardSeq;
     boardBusy = true;
     renderRec();
@@ -815,18 +826,21 @@ function workerMain(scope) {
           // Board as before (card counts too): nothing was played. After a few looks, the "new" card was the
           // current one misread or re-read: it replaces it, and the board stays.
           if (++unchanged < 3) continue;
-          if (observing.face !== G.current.label) enterCard(observing.face);
+          if (observing.face !== G.current.label) {
+            enterCard(observing.face);
+            cardImg = { card: G.current, img: observing.img };
+          }
           return;
         }
         const m = resolveMove(r);
-        if (m) return applyObserved(m, r, observing.face);
+        if (m) return applyObserved(m, r, observing.face, observing.img);
       }
       diag(
         last
           ? `move not read (${last.stable ? 'settled' : 'still moving'}): screen totals ${last.totals.map((t) => t.pat ?? '-').join(' ')} cards ${last.cols.map((c) => c.slots.map((s) => s.label ?? '?').join('') || '0').join('|')} · advisor totals ${colTotals(G.cols).join(' ')} cards ${G.cols.map((c) => c.map((x) => x.label).join('') || '0').join('|')} playing ${G.current.label}`
           : 'move not read: no picture',
       );
-      askColumn = { face: observing.face };
+      askColumn = { face: observing.face, img: observing.img };
       say('Which column?');
     } finally {
       observing = null;
@@ -862,12 +876,13 @@ function workerMain(scope) {
     pat === null ||
     (pat.includes('?') && pat.length < String(n).length) ||
     (String(n).length === pat.length && [...pat].every((ch, j) => ch === '?' || ch === String(n)[j]));
-  // A column's cards against the screen: its total and how many cards are stacked there; when the total can't be
-  // fully read yet, also every rank the reader can name.
+  // A column's cards against the screen. A total read in full decides on its own (the card count can be thrown off by
+  // a card being dragged over the column); otherwise the number of cards stacked there and every rank the reader can
+  // name must agree too.
   const fitsCol = (cards, col, pat) =>
-    fits(colTotal(cards), pat) &&
-    cards.length === col.n &&
-    ((pat !== null && !pat.includes('?')) || col.slots.every((s, k) => s.label === null || faceRank(s.label) === cards[k].r));
+    pat !== null && !pat.includes('?')
+      ? fits(colTotal(cards), pat)
+      : fits(colTotal(cards), pat) && cards.length === col.n && col.slots.every((s, k) => s.label === null || faceRank(s.label) === cards[k].r);
   // Column order p (screen column i shows advisor column p[i]) under which `cols` fit the reading r; or null.
   const alignment = (cols, r) => PERMS.find((p) => p.every((src, i) => fitsCol(cols[src], r.cols[i], r.totals[i].pat))) || null;
   const isIdentity = (p) => p.every((x, i) => x === i);
@@ -950,7 +965,7 @@ function workerMain(scope) {
       const m = resolveMove(r);
       const face = Vision.boxFace();
       diag(`check: board moved without a card event (move ${m ? 'found' : 'not found'}, box ${face || '-'})`);
-      if (m && (face || deckTotal() === 0)) applyObserved(m, r, face);
+      if (m && (face || deckTotal() === 0)) applyObserved(m, r, face, Vision.lastImage());
       return;
     }
     if (!p && pre) {
