@@ -805,9 +805,11 @@ function workerMain(scope) {
     renderRec();
     try {
       let unchanged = 0;
+      let last = null;
       for (let tries = 0; tries < 8; tries++) {
         const r = await Vision.readBoard(400); // the placed card may still be landing
         if (seq !== boardSeq || !r) break;
+        last = r;
         if (!r.stable) continue;
         if (alignment(G.cols, r)) {
           // Board as before (card counts too): nothing was played. After a few looks, the "new" card was the
@@ -819,6 +821,11 @@ function workerMain(scope) {
         const m = resolveMove(r);
         if (m) return applyObserved(m, r, observing.face);
       }
+      diag(
+        last
+          ? `move not read (${last.stable ? 'settled' : 'still moving'}): screen totals ${last.totals.map((t) => t.pat ?? '-').join(' ')} cards ${last.cols.map((c) => c.slots.map((s) => s.label ?? '?').join('') || '0').join('|')} · advisor totals ${colTotals(G.cols).join(' ')} cards ${G.cols.map((c) => c.map((x) => x.label).join('') || '0').join('|')} playing ${G.current.label}`
+          : 'move not read: no picture',
+      );
       askColumn = { face: observing.face };
       say('Which column?');
     } finally {
@@ -876,7 +883,7 @@ function workerMain(scope) {
   // problem during a real game can be looked at afterwards.
   function diag(text) {
     if (matchLog === null) return; // not connected to the receiver
-    fetch(rxBase + 'receiver/debug', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: text }) }).catch(() => {});
+    fetch(rxBase + 'receiver/debug', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: `[${Vision.tab}] ${text}` }) }).catch(() => {});
   }
 
   async function checkBoard(periodic) {
@@ -1159,6 +1166,10 @@ function workerMain(scope) {
   $('capSpeak').checked = settings.speak;
   $('capSpeak').onchange = () => {
     settings.speak = $('capSpeak').checked;
+    if (!settings.speak && window.speechSynthesis) {
+      speech.queue.length = 0; // nothing more from this tab, including phrases already waiting
+      speechSynthesis.cancel();
+    }
     save(LS_SET, settings);
   };
   Vision.init({

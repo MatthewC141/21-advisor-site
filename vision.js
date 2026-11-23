@@ -60,6 +60,7 @@ function visionWorker(scope) {
       let ok = false;
       try {
         const r = await fetch(url, { cache: 'no-store' });
+        if (r.status === 409) return scope.postMessage({ paused: true }); // another advisor tab took over
         if (r.status === 200) {
           const bmp = await createImageBitmap(await r.blob());
           if (latest) latest.close();
@@ -321,31 +322,37 @@ const Vision = (function () {
   }
 
   // Reads the board `delay` ms from now: {stable, totals: [{pat, gl}] x4, deck, score: {pat, gl},
-  // cols: [{n, slots: [{label, g}]}] x4, busts: count or null}. stable = nothing changed over 300 ms (no animation).
-  // Phone mode only: a shared window has its own borders, so the fixed spots would miss. null without frames.
+  // cols: [{n, slots: [{label, g}]}] x4, busts: count or null}. stable = two grabs 300 ms apart read the same
+  // (numbers, card counts, cards, busts); pixels alone never settle on the real game, the timer and video compression
+  // keep them shimmering. Phone mode only: a shared window has its own borders, so the fixed spots would miss. null
+  // without frames.
   function readBoard(delay) {
     if (!boardOn()) return Promise.resolve(null);
     const id = ++grabSeq;
     return new Promise((res) => {
       grabs.set(id, (a, b) => {
         if (!a || !b) return res(null);
-        const stable = a.every((g, i) => mad(g, b[i]) < MOTION);
-        const bustMeans = [0, 1, 2].map((i) => b[B_BUST + i].reduce((s, v) => s + v, 0) / b[B_BUST + i].length);
-        res({
-          stable,
-          totals: [0, 1, 2, 3].map((c) => readNumber('total', b[B_TOTAL + c], BOARD[B_TOTAL + c])),
-          deck: readNumber('deck', b[B_DECK], BOARD[B_DECK]),
-          score: readNumber('score', b[B_SCORE], BOARD[B_SCORE], 6),
-          cols: [0, 1, 2, 3].map((c) => {
-            const n = stackCount(b[B_STACK + c], BOARD[B_STACK + c]);
-            return { n, slots: [0, 1, 2, 3].slice(0, n).map((k) => readSlot(b[B_SLOT + 4 * c + k])) };
-          }),
-          bustMeans,
-          busts: readBusts(bustMeans),
-        });
+        const ra = parseBoard(a);
+        const rb = parseBoard(b);
+        const key = (r) => JSON.stringify([r.totals.map((t) => t.pat), r.deck.pat, r.score.pat, r.cols.map((c) => [c.n, c.slots.map((s) => s.label)]), r.busts]);
+        res(Object.assign(rb, { stable: key(ra) === key(rb) }));
       });
       worker.postMessage({ cmd: 'grab', id, rois: BOARD, delay, gap: 300 });
     });
+  }
+  function parseBoard(b) {
+    const bustMeans = [0, 1, 2].map((i) => b[B_BUST + i].reduce((s, v) => s + v, 0) / b[B_BUST + i].length);
+    return {
+      totals: [0, 1, 2, 3].map((c) => readNumber('total', b[B_TOTAL + c], BOARD[B_TOTAL + c])),
+      deck: readNumber('deck', b[B_DECK], BOARD[B_DECK]),
+      score: readNumber('score', b[B_SCORE], BOARD[B_SCORE], 6),
+      cols: [0, 1, 2, 3].map((c) => {
+        const n = stackCount(b[B_STACK + c], BOARD[B_STACK + c]);
+        return { n, slots: [0, 1, 2, 3].slice(0, n).map((k) => readSlot(b[B_SLOT + 4 * c + k])) };
+      }),
+      bustMeans,
+      busts: readBusts(bustMeans),
+    };
   }
 
   // Bust markers: their brightness is learned per marker while the advisor's bust count agrees with the screen.
@@ -583,20 +590,30 @@ const Vision = (function () {
   }
 
   // The bundled AirPlay receiver: the page is served by it (base ''), or the public site reaches it on this PC
-  // (base RX_URL). Reads the iPhone's frames straight from it.
+  // (base RX_URL). Reads the iPhone's frames straight from it. Only one tab at a time: this one claims the receiver,
+  // and a tab that opens later takes over (this one then pauses, with a button to take it back).
+  const TAB = Math.random().toString(36).slice(2, 10);
+  let rxBase = null;
+  let paused = false;
+  async function claim() {
+    await fetch(rxBase + 'receiver/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tab: TAB }) }).catch(() => {});
+    paused = false;
+    $('btnRx').hidden = true;
+    spawn({ url: new URL(rxBase + 'receiver/frame.jpg?tab=' + TAB, location.href).href }, []);
+  }
   function startPhone(name, base) {
     if (worker) stop(); // a shared-window capture gives way
     phone = name;
+    rxBase = base;
     const panel = $('capPanel');
     panel.parentNode.insertBefore(panel, panel.parentNode.children[1]); // right under the top bar
     $('capTitle').textContent = 'iPhone';
-    $('capIntro').textContent = `On your iPhone: Control Center → Screen Mirroring → "${name}". The advisor reads each card you're dealt, takes it that you played the advised move, and calls out the next one. Played something else? Undo twice and fix it by hand.`;
+    $('capIntro').textContent = `On your iPhone: Control Center → Screen Mirroring → "${name}". The advisor reads each card you're dealt and the moves you make off the board, and shows the next move.`;
     $('btnCap').hidden = true;
-    $('btnRx').hidden = true;
     $('capVideo').hidden = true;
     $('capImg').hidden = false;
     $('capImg').src = base + 'receiver/stream.mjpg';
-    spawn({ url: new URL(base + 'receiver/frame.jpg', location.href).href }, []);
+    claim();
     opts.onReceiver(base);
   }
 
@@ -632,6 +649,16 @@ const Vision = (function () {
     worker.onmessage = (e) => {
       const d = e.data;
       if (d.ended) stop();
+      else if (d.paused) {
+        // another advisor tab took the receiver over: stop reading (and talking) here
+        worker.terminate();
+        worker = null;
+        paused = true;
+        $('btnRx').textContent = 'Use this tab';
+        $('btnRx').hidden = false;
+        renderPanel();
+        opts.onStatus('Paused: the advisor is open in another tab');
+      }
       else if (d.grab) {
         const done = grabs.get(d.grab);
         grabs.delete(d.grab);
@@ -696,8 +723,9 @@ const Vision = (function () {
   function renderPanel() {
     const on = !!worker;
     $('btnCap').textContent = on ? 'Stop capture' : 'Capture mirror window';
-    $('capView').hidden = !on;
-    if (!on) setState('off');
+    $('capView').hidden = !on && !paused;
+    if (paused) setState('paused: the advisor is open in another tab', 'warning');
+    else if (!on) setState('off');
     else if (phone && !live) setState('waiting for iPhone', 'warning');
     else if (!saved.roi) setState('draw a box on the preview', 'warning');
     else setState(phone ? 'iPhone connected' : 'watching', 'success');
@@ -847,7 +875,7 @@ const Vision = (function () {
       drawOverlay();
     };
     renderPanel();
-    $('btnRx').onclick = () => connectReceiver(true);
+    $('btnRx').onclick = () => (paused ? claim() : connectReceiver(true));
     if (location.protocol === 'http:') probe('').then((s) => (s ? startPhone(s.name, '') : offerReceiver()));
     else if (location.protocol === 'https:') offerReceiver();
   }
@@ -858,5 +886,6 @@ const Vision = (function () {
     init, learn, rearm, learnedAll, readBoard, learnNumber, learnSlot, settleLearning, calibrateBusts, scanPayout, boardOn,
     active: () => !!worker,
     boxFace: () => boxFace, // card recognised in the box right now (null: none, unknown or not learned)
+    tab: TAB,
   };
 })();
