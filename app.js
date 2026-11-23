@@ -949,6 +949,7 @@ function workerMain(scope) {
       readerText = t;
       if (pip) pip.document.getElementById('pipRead').textContent = t;
     },
+    onReceiver: (base) => loadMatches(base),
   });
 
   function renderStatus() {
@@ -1407,7 +1408,8 @@ function workerMain(scope) {
   document.addEventListener('keydown', onKey);
 
   // ---------- 1v1 match log: opponents, their scores and the bet, kept in data/advisor.db by the receiver ----------
-  let matchLog = null; // newest first; null when the page isn't served by the receiver
+  let matchLog = null; // newest first; null until the receiver is connected
+  let rxBase = ''; // receiver address: '' when it serves this page, else its URL on this PC
   async function sendMatch(method, url, body) {
     const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const d = await r.json().catch(() => ({}));
@@ -1430,7 +1432,7 @@ function workerMain(scope) {
     f.onsubmit = async (e) => {
       e.preventDefault();
       try {
-        const row = await sendMatch('POST', 'receiver/matches', {
+        const row = await sendMatch('POST', rxBase + 'receiver/matches', {
           opponent: f.opponent.value,
           opponent_score: f.opponent_score.value === '' ? null : Number(f.opponent_score.value),
           my_score: G.score,
@@ -1472,7 +1474,7 @@ function workerMain(scope) {
       inp.onchange = async () => {
         if (inp.value === '') return;
         try {
-          const row = await sendMatch('PATCH', 'receiver/matches/' + inp.dataset.id, { opponent_score: Number(inp.value) });
+          const row = await sendMatch('PATCH', rxBase + 'receiver/matches/' + inp.dataset.id, { opponent_score: Number(inp.value) });
           matchLog[matchLog.findIndex((m) => m.id === row.id)] = row;
           renderMatches();
         } catch (err) {
@@ -1480,8 +1482,9 @@ function workerMain(scope) {
         }
       };
   }
-  if (location.protocol.startsWith('http'))
-    fetch('receiver/matches', { cache: 'no-store' })
+  function loadMatches(base) {
+    rxBase = base;
+    fetch(base + 'receiver/matches', { cache: 'no-store' })
       .then((r) => (r.ok ? r.json() : null))
       .then((rows) => {
         if (!Array.isArray(rows)) return;
@@ -1490,6 +1493,7 @@ function workerMain(scope) {
         renderRec();
       })
       .catch(() => {});
+  }
 
   renderPayoutInputs();
   render();

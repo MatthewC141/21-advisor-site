@@ -364,18 +364,48 @@ const Vision = (function () {
     spawn({ readable: proc.readable }, [proc.readable]);
   }
 
-  // Page served by the bundled AirPlay receiver: read the iPhone's frames straight from it.
-  function startPhone(name) {
+  // The bundled AirPlay receiver: the page is served by it (base ''), or the public site reaches it on this PC
+  // (base RX_URL). Reads the iPhone's frames straight from it.
+  function startPhone(name, base) {
+    if (worker) stop(); // a shared-window capture gives way
     phone = name;
     const panel = $('capPanel');
     panel.parentNode.insertBefore(panel, panel.parentNode.children[1]); // right under the top bar
     $('capTitle').textContent = 'iPhone';
     $('capIntro').textContent = `On your iPhone: Control Center → Screen Mirroring → "${name}". The advisor reads each card you're dealt, takes it that you played the advised move, and calls out the next one. Played something else? Undo twice and fix it by hand.`;
     $('btnCap').hidden = true;
+    $('btnRx').hidden = true;
     $('capVideo').hidden = true;
     $('capImg').hidden = false;
-    $('capImg').src = 'receiver/stream.mjpg';
-    spawn({ url: new URL('receiver/frame.jpg', location.href).href }, []);
+    $('capImg').src = base + 'receiver/stream.mjpg';
+    spawn({ url: new URL(base + 'receiver/frame.jpg', location.href).href }, []);
+    opts.onReceiver(base);
+  }
+
+  // Public site: the receiver runs on this PC at RX_URL (?rx= overrides). Connecting is a click the first time
+  // (Chrome may ask to allow local network access); after that it reconnects on load.
+  const RX_URL = new URLSearchParams(location.search).get('rx') || 'http://127.0.0.1:8721/';
+  const RX_AUTO = 'tw21.rx.auto';
+  async function probe(base) {
+    try {
+      const r = await fetch(base + 'receiver/status', { cache: 'no-store' });
+      const s = r.ok ? await r.json() : null;
+      return s && s.name ? s : null;
+    } catch {
+      return null;
+    }
+  }
+  async function connectReceiver(manual) {
+    const s = await probe(RX_URL);
+    if (s) {
+      localStorage.setItem(RX_AUTO, '1');
+      return startPhone(s.name, RX_URL);
+    }
+    if (manual) setState('receiver not found: start 21 Advisor Receiver on this PC', 'error');
+  }
+  function offerReceiver() {
+    $('btnRx').hidden = false;
+    if (localStorage.getItem(RX_AUTO)) connectReceiver(false);
   }
 
   function spawn(src, transfer) {
@@ -594,11 +624,9 @@ const Vision = (function () {
       drawOverlay();
     };
     renderPanel();
-    if (location.protocol.startsWith('http'))
-      fetch('receiver/status', { cache: 'no-store' })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((s) => s && s.name && startPhone(s.name))
-        .catch(() => {});
+    $('btnRx').onclick = () => connectReceiver(true);
+    if (location.protocol === 'http:') probe('').then((s) => (s ? startPhone(s.name, '') : offerReceiver()));
+    else if (location.protocol === 'https:') offerReceiver();
   }
 
   const boardOn = () => !!(worker && phone && live && saved.board);
