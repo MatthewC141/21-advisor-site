@@ -148,7 +148,8 @@ function workerMain(scope) {
 
   // ---------- game state ----------
   function newGame() {
-    return { cols: [[], [], [], []], busts: 0, staysLeft: settings.rules.stays, streak: 0, score: 0, deck: E.FULL_DECK.slice(), current: null, turn: 0 };
+    // moves / deviations / unverified: the strategy record (see place)
+    return { cols: [[], [], [], []], busts: 0, staysLeft: settings.rules.stays, streak: 0, score: 0, deck: E.FULL_DECK.slice(), current: null, turn: 0, moves: 0, deviations: 0, unverified: 0 };
   }
   let G = load(LS_GAME) || newGame();
   let history = load(LS_HIST) || [];
@@ -217,9 +218,25 @@ function workerMain(scope) {
     commit();
   }
 
-  function place(c, stayCol) {
+  // Same position after either move (an equivalent column, or the same stay done another way)?
+  function sameMove(a, b) {
+    const key = (m) => {
+      const T = stateS();
+      E.step(ctx, T, (m.stay + 1) * 4 + m.col, G.current.r);
+      return Array.from(T.subarray(0, 4)).sort((x, y) => x - y).join() + '|' + Array.from(T.subarray(4)).join();
+    };
+    return key(a) === key(b);
+  }
+
+  // `advised`: the move the advice gave for this card, for the strategy record. null = nothing to compare against
+  // (no advice was ready, or it was for a misread card); left out = whatever is recommended right now (a click).
+  function place(c, stayCol, advised) {
     if (!G.current || isOver()) return;
     snapshot();
+    if (advised === undefined) advised = recommended();
+    G.moves = (G.moves || 0) + 1;
+    if (!advised) G.unverified = (G.unverified || 0) + 1;
+    else if (!sameMove({ col: c, stay: stayCol }, advised)) G.deviations = (G.deviations || 0) + 1;
     if (stayCol >= 0) doStay(stayCol);
     const S = stateS();
     const res = E.step(ctx, S, c, G.current.r);
@@ -236,6 +253,17 @@ function workerMain(scope) {
       toast('Bust!', lost ? 'Game lost' : `${G.busts} of ${settings.rules.maxBusts}`, true);
     }
     commit();
+  }
+
+  // Strategy record: every move matched the advice (deviations) and every move could be checked (unverified).
+  const followed = (g) => !(g.deviations || 0) && !(g.unverified || 0);
+  function adviceText(g) {
+    const n = g.moves || 0;
+    if (followed(g)) return `<span class="s-success">followed on all ${n} moves</span>`;
+    const parts = [];
+    if (g.deviations) parts.push(`${g.deviations} of ${n} moves differed`);
+    if (g.unverified) parts.push(`${g.unverified} couldn't be checked`);
+    return `<span class="s-warning">${parts.join(' · ')}</span>`;
   }
 
   function outcomeName(pts) {
@@ -508,7 +536,10 @@ function workerMain(scope) {
         };
         return;
       }
-      const ended = kv([['Ended by', G.busts >= R.maxBusts ? `${R.maxBusts} busts` : 'all 52 cards played']]);
+      const ended = kv([
+        ['Ended by', G.busts >= R.maxBusts ? `${R.maxBusts} busts` : 'all 52 cards played'],
+        ['Advice', adviceText(G)],
+      ]);
       const btn = '<div class="row" style="margin-top:12px"><button class="btn gold sm" id="btnNew2">New game</button></div>';
       if (isH2H()) {
         const w = payTab[Math.min(30000, Math.max(0, G.score))];
@@ -631,17 +662,19 @@ function workerMain(scope) {
   let readerText = '';
 
   // The player made the advised move on the phone before the next card showed.
+  let lastAdvised = null; // the move advance() assumed, to judge the move the board check finds instead
   function advance() {
     lastPre = null;
     if (!G.current || isOver()) return;
     lastPre = JSON.stringify(G);
     if (cur && cur.chunks.length) cur.stats = computeStats();
     let r = recommended();
+    lastAdvised = r && { col: r.col, stay: r.stay };
     if (!r) {
       const a = E.greedy(ctx, stateS(), Int32Array.from(G.deck), deckTotal(), G.current.r);
       r = { col: E.actCol(a), stay: E.actStay(a) };
     }
-    place(r.col, r.stay);
+    place(r.col, r.stay, lastAdvised);
   }
 
   // Starts the game after one that just ended (streak: the next target if this one was beaten).
@@ -795,6 +828,7 @@ function workerMain(scope) {
     for (const cards of cols) for (const x of cards) deck[x.r]--;
     snapshot();
     G.cols = cols;
+    G.unverified = (G.unverified || 0) + 1; // the moves that led here are unknown
     G.deck = deck.map((n, i) => Math.min(E.FULL_DECK[i], Math.max(0, n)));
     commit();
     return true;
@@ -823,7 +857,8 @@ function workerMain(scope) {
       if (found.length === 1) {
         const label = G.current.label;
         const a = found[0];
-        if (a.r !== P.current.r) {
+        const misread = a.r !== P.current.r;
+        if (misread) {
           // The previous card was misread: swap it in the unseen counts.
           P.deck[P.current.r]++;
           P.deck[a.r]--;
@@ -831,7 +866,7 @@ function workerMain(scope) {
           P.current = { r: a.r, label: E.RANK_LABELS[a.r] };
         }
         G = P;
-        place(a.col, a.stay);
+        place(a.col, a.stay, misread ? null : lastAdvised); // advice for a misread card proves nothing
         enterCard(label);
         autoCard = G.current;
         p = alignment(G.cols, r);
@@ -1545,6 +1580,10 @@ function workerMain(scope) {
           bet: f.bet.value === '' ? null : Number(f.bet.value),
           win: settings.h2h.win,
           typical_opp: Math.round(BE),
+          moves: G.moves || 0,
+          deviations: G.deviations || 0,
+          unverified: G.unverified || 0,
+          followed: followed(G) ? 1 : 0,
         });
         matchLog.unshift(row);
         G.logged = row.opponent;
@@ -1565,14 +1604,15 @@ function workerMain(scope) {
       return;
     }
     const tone = { win: 'success', loss: 'error', tie: 'muted' };
-    $('matches').innerHTML = `<table><thead><tr><th>When</th><th>Opponent</th><th class="e">Bet</th><th class="e">You</th><th class="e">Them</th><th>Result</th></tr></thead><tbody>
+    $('matches').innerHTML = `<table><thead><tr><th>When</th><th>Opponent</th><th class="e">Bet</th><th class="e">You</th><th class="e">Them</th><th>Result</th><th>Advice</th></tr></thead><tbody>
       ${matchLog
         .slice(0, 15)
         .map(
           (m) => `<tr><td>${esc(m.played_at.slice(5, 16))}</td><td>${esc(m.opponent)}</td><td class="e">${m.bet == null ? '' : '$' + m.bet.toFixed(2)}</td>
             <td class="e">${fmt(m.my_score)}</td>
             <td class="e">${m.opponent_score == null ? `<input class="oppfill" data-id="${m.id}" type="number" min="0" step="50" placeholder="add">` : fmt(m.opponent_score)}</td>
-            <td>${m.result ? `<span class="s-${tone[m.result]}">${m.result}</span>` : '<span class="dim">pending</span>'}</td></tr>`,
+            <td>${m.result ? `<span class="s-${tone[m.result]}">${m.result}</span>` : '<span class="dim">pending</span>'}</td>
+            <td>${m.followed == null ? '' : m.followed ? '<span class="s-success">✓ followed</span>' : `<span class="s-warning">${m.deviations ? `${m.deviations} off` : 'unchecked'}</span>`}</td></tr>`,
         )
         .join('')}</tbody></table>`;
     for (const inp of $('matches').querySelectorAll('.oppfill'))
