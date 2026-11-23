@@ -338,7 +338,18 @@ function EngineFactory() {
   const HIGH_Q =
     Math.log((OBS_HIGH.mult - 1) / (2.2 - 1)) / Math.log((OBS_HIGH.score - OBS_HIGH.be) / (OBS_HIGH.s22 - OBS_HIGH.be));
   const DEFAULT_CURVE = { be: 4700, s22: 7823, s27: 7900, m22: 2.2, m27: 2.7 };
+  // c.pts (read off the game's payout screen): [score, multiplier] pairs, ascending; straight lines between
+  // them, the lowest segment continued down to 0, flat above the top point. Otherwise the fitted curve above.
   function payout(score, c) {
+    if (c.pts && c.pts.length >= 2) {
+      const p = c.pts;
+      if (score >= p[p.length - 1][0]) return p[p.length - 1][1];
+      let i = 1;
+      while (i < p.length - 1 && score > p[i][0]) i++;
+      const [s0, m0] = p[i - 1];
+      const [s1, m1] = p[i];
+      return Math.max(0, m0 + ((m1 - m0) * (score - s0)) / (s1 - s0));
+    }
     if (score >= c.s27) return c.m27;
     if (score >= c.s22) return c.m22 + (c.m27 - c.m22) * Math.pow((score - c.s22) / (c.s27 - c.s22), HIGH_Q);
     if (score >= c.be) return 1 + (c.m22 - 1) * Math.pow((score - c.be) / (c.s22 - c.be), HIGH_Q);

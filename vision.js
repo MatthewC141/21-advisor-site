@@ -68,7 +68,7 @@ function visionWorker(scope) {
         }
       } catch {}
       if (ok !== live) scope.postMessage({ live: (live = ok) });
-      if (ok) sample();
+      if (ok) roi ? sample() : scope.postMessage({ tick: true }); // no card box yet: still drive the payout check
       await new Promise((res) => setTimeout(res, Math.max(0, interval - (Date.now() - t))));
     }
   }
@@ -209,9 +209,10 @@ const Vision = (function () {
   let grabSeq = 0;
   const grabs = new Map();
 
-  // Bright-on-dark digits in a w x h gray image, left to right, each scaled to GH rows (keeping its shape, so a
-  // narrow 1 stays narrow) and centred in GW columns. [] when nothing bright.
-  function glyphs(g, w, h) {
+  // Bright-on-dark digits in a w x h gray image, left to right, each scaled to gh rows (keeping its shape, so a
+  // narrow 1 stays narrow) and centred in gw columns; avg = area-average each cell (for upscaled grabs) instead of
+  // sampling its centre. [] when nothing bright.
+  function glyphs(g, w, h, gw0 = GW, gh0 = GH, avg = false) {
     let lo = 255;
     let hi = 0;
     for (const v of g) {
@@ -241,16 +242,26 @@ const Vision = (function () {
             y1 = Math.max(y1, y);
           }
       if (x1 - x0 < 1 || y1 - y0 < h * 0.3) continue; // speck, not a digit
-      const q = new Uint8Array(GW * GH).fill(lo);
+      const q = new Uint8Array(gw0 * gh0).fill(lo);
       const rw = x1 - x0 + 1;
       const rh = y1 - y0 + 1;
-      const gw = Math.min(GW, Math.max(1, Math.round((rw * GH) / rh)));
-      const off = (GW - gw) >> 1;
-      for (let gy = 0; gy < GH; gy++)
+      const gw = Math.min(gw0, Math.max(1, Math.round((rw * gh0) / rh)));
+      const off = (gw0 - gw) >> 1;
+      for (let gy = 0; gy < gh0; gy++)
         for (let gx = 0; gx < gw; gx++) {
-          const sx = Math.min(x1, Math.floor(x0 + ((gx + 0.5) * rw) / gw));
-          const sy = Math.min(y1, Math.floor(y0 + ((gy + 0.5) * rh) / GH));
-          q[gy * GW + off + gx] = g[sy * w + sx];
+          if (!avg) {
+            const sx = Math.min(x1, Math.floor(x0 + ((gx + 0.5) * rw) / gw));
+            const sy = Math.min(y1, Math.floor(y0 + ((gy + 0.5) * rh) / gh0));
+            q[gy * gw0 + off + gx] = g[sy * w + sx];
+            continue;
+          }
+          const sx0 = x0 + Math.floor((gx * rw) / gw);
+          const sx1 = Math.max(x0 + Math.floor(((gx + 1) * rw) / gw), sx0 + 1);
+          const sy0 = y0 + Math.floor((gy * rh) / gh0);
+          const sy1 = Math.max(y0 + Math.floor(((gy + 1) * rh) / gh0), sy0 + 1);
+          let s = 0;
+          for (let y = sy0; y < sy1; y++) for (let x = sx0; x < sx1; x++) s += g[y * w + x];
+          q[gy * gw0 + off + gx] = Math.round(s / ((sy1 - sy0) * (sx1 - sx0)));
         }
       out.push(q);
     }
@@ -302,6 +313,86 @@ const Vision = (function () {
     persist();
   }
 
+  // ---------- payout screen: read the game's payout graph before a cash game ----------
+  // The graph's right edge lists 10 scores on evenly spaced gridlines (iPhone mirror, 498 x 1080: rows 43 px apart
+  // from y 455). Gridlines are evenly spaced in payout: Break Even (the lowest white label; lower ones are red) is 1x,
+  // the row with the "2.2x" box is 2.2x, so each row is a fixed step; the top row is the 2.7x maximum. Labels are
+  // read at 3x with built-in digit templates (payout-digits.js), so it works without any teaching.
+  const PAY_ROWS = 10;
+  const PAY_ROIS = [];
+  for (let k = 0; k < PAY_ROWS; k++) {
+    const y = 455 + 43 * k;
+    PAY_ROIS.push({ x: 398 / 498, y: (y - 12) / 1080, w: 54 / 498, h: 24 / 1080, ow: 162, oh: 72 }); // score label
+  }
+  for (let k = 0; k < PAY_ROWS; k++) {
+    const y = 455 + 43 * k;
+    PAY_ROIS.push({ x: 140 / 498, y: (y - 1) / 1080, w: 230 / 498, h: 3 / 1080, ow: 230, oh: 3 }); // label box strip
+  }
+  const payTpl =
+    typeof PAYOUT_DIGITS === 'undefined'
+      ? []
+      : Object.entries(PAYOUT_DIGITS).flatMap(([v, list]) => list.map((s) => Object.assign(makeTpl(Number(v), unb64(s)), { v: Number(v) })));
+  const PAY_EVERY = 15; // samples between payout-screen checks (about 1.5 s)
+  let payTick = 0;
+  let payBusy = false;
+  let lastPay = '';
+
+  // {be, s22, s27, pts: [[score, multiplier]] ascending} from grabbed label/strip images, or null if this isn't the
+  // payout screen (every label must read, scores must fall row by row, boxes must sit on the 2.7x, 2.2x, 1x rows).
+  function parsePayout(gr) {
+    const rows = [];
+    for (let k = 0; k < PAY_ROWS; k++) {
+      const g = gr[k];
+      const gl = glyphs(g, 162, 72, 12, 20, true);
+      if (gl.length < 3 || gl.length > 5) return null;
+      let digits = '';
+      for (const q of gl) {
+        const r = rank(zscore(q).z, payTpl, (t) => t.v);
+        if (!r.best || r.best.c < 0.8) return null;
+        digits += r.best.f;
+      }
+      let hi = 0;
+      for (const v of g) if (v > hi) hi = v;
+      let box = 0;
+      for (const v of gr[PAY_ROWS + k]) if (v > 35 && v < 95) box++;
+      rows.push({ score: Number(digits), hi, box: box >= 60 });
+    }
+    // Red labels (below break even) are darker in gray than white ones (~125 vs ~160): split at the midpoint
+    // when the two brightness groups are clearly apart.
+    const his = rows.map((r) => r.hi);
+    const mx = Math.max(...his);
+    const mn = Math.min(...his);
+    for (const r of rows) r.red = mx - mn >= 20 && r.hi < (mx + mn) / 2;
+    for (let k = 1; k < PAY_ROWS; k++) if (rows[k].score >= rows[k - 1].score) return null;
+    const be = rows.findIndex((r) => r.red) - 1; // lowest white row
+    if (be < 2 || rows.slice(be + 1).some((r) => !r.red)) return null;
+    const mids = rows.map((r, k) => (r.box && k > 0 && k < be ? k : -1)).filter((k) => k >= 0);
+    if (!rows[0].box || !rows[be].box || mids.length !== 1) return null;
+    const k22 = mids[0];
+    const step = 1.2 / (be - k22);
+    const mult = (k) => (k === 0 ? 2.7 : Math.max(0, Math.min(2.7, 1 + (be - k) * step)));
+    const pts = rows.map((r, k) => [r.score, Math.round(mult(k) * 1000) / 1000]).reverse();
+    return { be: rows[be].score, s22: rows[k22].score, s27: rows[0].score, pts };
+  }
+
+  function maybeReadPayout() {
+    if (payBusy || !phone || !live || !opts.wantPayout() || ++payTick % PAY_EVERY) return;
+    payBusy = true;
+    const id = ++grabSeq;
+    grabs.set(id, (a, b) => {
+      payBusy = false;
+      if (!a || !b || !a.every((g, i) => mad(g, b[i]) < MOTION)) return;
+      const curve = parsePayout(b);
+      if (!curve) return;
+      const key = JSON.stringify(curve.pts);
+      if (key === lastPay) return;
+      lastPay = key;
+      note(`payout screen: 1x ${curve.be} · 2.2x ${curve.s22} · 2.7x ${curve.s27}`);
+      opts.onPayout(curve);
+    });
+    worker.postMessage({ cmd: 'grab', id, rois: PAY_ROIS, delay: 0, gap: 300 });
+  }
+
   function note(text) {
     events.unshift(new Date().toLocaleTimeString() + '  ' + text);
     events.length = Math.min(events.length, 40);
@@ -311,6 +402,7 @@ const Vision = (function () {
   function onGray(g) {
     last = g;
     drawSig(g);
+    maybeReadPayout();
     const motion = prev ? mad(g, prev) : 255;
     prev = g;
     const m = classify(g);
@@ -418,7 +510,7 @@ const Vision = (function () {
         const done = grabs.get(d.grab);
         grabs.delete(d.grab);
         if (done) done(d.a, d.b);
-      }
+      } else if (d.tick) maybeReadPayout();
       else if ('live' in d) {
         live = d.live;
         if (live) rearm(); // mirroring (re)started: the card showing may already be entered

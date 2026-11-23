@@ -950,6 +950,8 @@ function workerMain(scope) {
       if (pip) pip.document.getElementById('pipRead').textContent = t;
     },
     onReceiver: (base) => loadMatches(base),
+    wantPayout: () => settings.mode === 'cash',
+    onPayout: applyScreenCurve,
   });
 
   function renderStatus() {
@@ -1117,6 +1119,10 @@ function workerMain(scope) {
     $('p22').value = settings.curve.s22;
     $('p27').value = settings.curve.s27;
     $('pBoost').value = settings.boost || 0;
+    const c = settings.curve;
+    $('curveSrc').textContent = c.pts
+      ? `Curve read from the game's payout screen at ${new Date(c.readAt).toLocaleTimeString()}: ${c.pts.map(([s, m]) => `${fmt(s)} → ${m}x`).join(' · ')}`
+      : 'Curve fitted to your past games (open the payout screen with the iPhone receiver connected to read the exact one).';
     $('pEntry').value = settings.entry || 10;
     if (document.activeElement !== $('sTargets')) $('sTargets').value = sg.targets.join(', ');
     $('sPayout').value = sg.payout;
@@ -1150,7 +1156,22 @@ function workerMain(scope) {
     const be = Number($('pBE').value);
     const s22 = Number($('p22').value);
     const s27 = Number($('p27').value);
-    return be > 0 && s22 > be && s27 > s22 ? Object.assign({}, settings.curve, { be, s22, s27 }) : null;
+    if (!(be > 0 && s22 > be && s27 > s22)) return null;
+    const c = settings.curve;
+    // The screen's points belong to its own three scores; new scores typed in fall back to the fitted curve.
+    if (be === c.be && s22 === c.s22 && s27 === c.s27) return Object.assign({}, c);
+    return { be, s22, s27, m22: c.m22, m27: c.m27 };
+  }
+  // Payout graph read off the game screen (cash mode): its three scores plus every gridline point.
+  function applyScreenCurve(r) {
+    if (settings.curve.pts && JSON.stringify(settings.curve.pts) === JSON.stringify(r.pts)) return;
+    settings.curve = Object.assign({}, E.DEFAULT_CURVE, { be: r.be, s22: r.s22, s27: r.s27, pts: r.pts, readAt: Date.now() });
+    save(LS_SET, settings);
+    rebuildPayout();
+    renderPayoutInputs();
+    render();
+    analyze();
+    toast('Payout curve read', `1x ${fmt(r.be)} · 2.2x ${fmt(r.s22)} · 2.7x ${fmt(r.s27)}`);
   }
   function readStreakInputs() {
     const targets = $('sTargets').value.split(/[\s,]+/).filter(Boolean).map(Number);
