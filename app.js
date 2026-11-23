@@ -867,8 +867,16 @@ function workerMain(scope) {
 
   function setBoard(text, tone) {
     const el = $('capBoardState');
+    if (el.textContent !== text) diag('board: ' + text);
     el.textContent = text;
     el.className = 'hint' + (tone ? ' s-' + tone : '');
+  }
+
+  // Diagnostics: reader log, board status and table status lines go to the receiver (GET /receiver/debug), so a
+  // problem during a real game can be looked at afterwards.
+  function diag(text) {
+    if (matchLog === null) return; // not connected to the receiver
+    fetch(rxBase + 'receiver/debug', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: text }) }).catch(() => {});
   }
 
   async function checkBoard(periodic) {
@@ -930,9 +938,12 @@ function workerMain(scope) {
     let p = alignment(G.cols, r);
     const notes = [];
     if (!p && periodic && pendingMove(r)) {
-      // the current card has been played; normally the next card brings it in, but after the last card none comes
-      const m = deckTotal() === 0 && resolveMove(r);
-      if (m) applyObserved(m, r, null);
+      // The board shows the current card played but no new-card event came (e.g. the next card looks the same, or
+      // it was the last card): the board itself brings the move in, with the card now in the box.
+      const m = resolveMove(r);
+      const face = Vision.boxFace();
+      diag(`check: board moved without a card event (move ${m ? 'found' : 'not found'}, box ${face || '-'})`);
+      if (m && (face || deckTotal() === 0)) applyObserved(m, r, face);
       return;
     }
     if (!p && pre) {
@@ -1162,10 +1173,11 @@ function workerMain(scope) {
       if (pip) pip.document.getElementById('pipRead').textContent = t;
     },
     onReceiver: (base) => loadMatches(base),
+    onLog: (t) => diag('reader: ' + t),
     wantPayout: () => settings.mode === 'cash',
     onPayout: applyScreenCurve,
-    // every ~3 s of samples: re-check the board while a card is waiting to be played
-    onTick: () => ++tickN % 30 === 0 && G.current && !isOver() && !askCard && !askColumn && !observing && checkBoard(true),
+    // every ~1.5 s of samples: re-check the board while a card is waiting to be played
+    onTick: () => ++tickN % 15 === 0 && G.current && !isOver() && !askCard && !askColumn && !observing && checkBoard(true),
   });
 
   function renderStatus() {
@@ -1293,8 +1305,11 @@ function workerMain(scope) {
       el.className = 'tstatus go';
       el.innerHTML = `<span>✓ Place on column ${rec.col + 1}</span>`;
     }
+    const kind = el.textContent.replace(/\d+%/, '');
+    if (kind !== lastStatus) diag('status: ' + (lastStatus = kind));
     renderPip();
   }
+  let lastStatus = '';
 
   function renderDeck() {
     $('deckLeft').textContent = `${deckTotal()} of 52 unseen`;

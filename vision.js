@@ -133,6 +133,7 @@ const Vision = (function () {
   let last = null; // newest sample
   let eventGray = null; // image of the last card event (what learn() stores)
   const events = []; // reader log, newest first
+  let boxFace = null; // card recognised in the box on the latest sample
 
   const b64 = (g) => btoa(String.fromCharCode.apply(null, g));
   const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
@@ -517,6 +518,7 @@ const Vision = (function () {
     events.unshift(new Date().toLocaleTimeString() + '  ' + text);
     events.length = Math.min(events.length, 40);
     $('capLog').textContent = events.join('\n');
+    opts.onLog(text);
   }
 
   function onGray(g) {
@@ -530,6 +532,7 @@ const Vision = (function () {
     // Until every card is learned, an unknown card can look like a known one: demand a closer match then.
     const thr = learnedAll() ? saved.thr : Math.max(saved.thr, 0.9);
     const face = m.best && m.best.c >= thr ? m.best.f : null;
+    boxFace = face === EMPTY ? null : face;
     if (accepted && mad(g, accepted) > CHANGE) changed = true;
     if (face !== acceptedFace) left = true;
     stableN = motion < MOTION ? stableN + 1 : 0;
@@ -851,5 +854,9 @@ const Vision = (function () {
 
   const boardOn = () => !!(worker && phone && live && saved.board);
 
-  return { init, learn, rearm, learnedAll, readBoard, learnNumber, learnSlot, settleLearning, calibrateBusts, scanPayout, boardOn, active: () => !!worker };
+  return {
+    init, learn, rearm, learnedAll, readBoard, learnNumber, learnSlot, settleLearning, calibrateBusts, scanPayout, boardOn,
+    active: () => !!worker,
+    boxFace: () => boxFace, // card recognised in the box right now (null: none, unknown or not learned)
+  };
 })();
