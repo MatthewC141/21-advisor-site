@@ -197,7 +197,8 @@
   td.e { font-variant-numeric: tabular-nums; font-weight: 700; }
   tr.sel td { background: linear-gradient(180deg, rgba(247,197,72,.32), rgba(201,138,18,.22)); }
   tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--gold-2); }
-  #moves { overflow-x: auto; }
+  #moves, #matches { overflow-x: auto; }
+  .oppfill { width: 90px; height: 28px; }
 
   .deck { display: grid; grid-template-columns: repeat(10, 1fr); gap: 6px; }
   .deck > div { background: rgba(255,255,255,.05); border-radius: 10px; padding: 6px 4px; text-align: center; display: flex; flex-direction: column; gap: 3px; }
@@ -222,8 +223,9 @@
   .toast .t2 { font: italic 900 24px var(--font); color: #fff; text-shadow: 0 2px 0 #000, 0 0 12px rgba(0,0,0,.6); margin-top: 4px; }
 
   /* screen capture */
+  [hidden] { display: none !important; }
   .capwrap { position: relative; display: inline-block; max-width: 100%; margin-top: 10px; }
-  .capwrap video { display: block; max-width: 100%; max-height: 420px; border-radius: 10px; background: #000; }
+  .capwrap video, .capwrap img { display: block; max-width: 100%; max-height: 420px; border-radius: 10px; background: #000; }
   .capwrap canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
   #capSig { width: 72px; height: 96px; image-rendering: pixelated; border-radius: 6px; background: #000; flex: none; }
   .learned { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -301,13 +303,14 @@
 
     <div class="panel">
       <div class="ph"><span>Game mode</span>
-        <span class="seg" id="modeSeg"><button data-mode="cash">Cash</button><button data-mode="streak">Streak</button></span></div>
+        <span class="seg" id="modeSeg"><button data-mode="cash">Cash</button><button data-mode="streak">Streak</button><button data-mode="h2h">1v1</button></span></div>
       <div id="cashBox">
         <div class="hint" style="margin-bottom:8px">Copy the three scores the game shows.</div>
         <div class="payrow">
           <label class="pin"><span>1x</span><input id="pBE" type="number" min="0" step="1"></label>
           <label class="pin"><span>2.2x</span><input id="p22" type="number" min="0" step="1"></label>
           <label class="pin"><span>2.7x</span><input id="p27" type="number" min="0" step="1"></label>
+          <label class="pin" title="Payout booster: every payout goes up by this %; the 1x / 2.2x / 2.7x scores stay the same"><span>Boost %</span><input id="pBoost" type="number" min="0" step="1"></label>
         </div>
         <div class="hint" style="margin-top:6px">Curve fitted to your games: 7,600 paid 1.458x, 6,350 paid 0.988x, 5,700 paid 0.766x. Flat at 2.7x above the max; the third bust loses the game outright (0x).</div>
       </div>
@@ -318,6 +321,14 @@
           <label class="pin"><span>Pays</span><input id="sPayout" type="number" min="0" step="0.1"></label>
         </div>
         <div class="steps" id="sSteps"></div>
+      </div>
+      <div id="h2hBox">
+        <div class="hint" style="margin-bottom:8px">Beat the other player's final score to win; you only see theirs after both games end. Moves are ranked by chance to win.</div>
+        <div class="payrow">
+          <label class="pin" title="What a win earns on top of getting your entry back"><span>Win $</span><input id="hWin" type="number" min="0" step="0.01"></label>
+          <label class="pin wide" title="The final score a usual opponent ends on"><span>Typical opponent</span><input id="hOpp" type="number" min="0" step="50"></label>
+        </div>
+        <div class="hint" id="hOppHint" style="margin-top:6px"></div>
       </div>
       <div class="payrow" style="margin-top:8px"><label class="pin"><span>Entry $</span><input id="pEntry" type="number" min="0" step="0.01"></label></div>
       <div class="err" id="payErr"></div>
@@ -336,9 +347,15 @@
       <div class="deck" id="deck"></div>
     </div>
 
+    <div class="panel" id="matchPanel" hidden>
+      <div class="ph"><span>1v1 log</span><span class="n" id="matchCount"></span></div>
+      <div id="matches"></div>
+      <datalist id="oppNames"></datalist>
+    </div>
+
     <div class="panel" id="capPanel">
-      <div class="ph"><span>Screen capture</span><span class="n" id="capState">off</span></div>
-      <div class="hint" style="margin-bottom:8px">Reads the dealt card from your phone-mirroring window (scrcpy, Phone Link, …). When a new card
+      <div class="ph"><span id="capTitle">Screen capture</span><span class="n" id="capState">off</span></div>
+      <div class="hint" id="capIntro" style="margin-bottom:8px">Reads the dealt card from your phone-mirroring window (scrcpy, Phone Link, …). When a new card
         shows, it takes it that you played the advised move, enters the new card and calls out the next move. Played something else? Undo twice
         and fix it by hand. Chrome or Edge.</div>
       <div class="row">
@@ -347,12 +364,16 @@
         <label class="row"><input type="checkbox" id="capSpeak"> <span class="muted">Speak moves while capturing</span></label>
       </div>
       <div id="capView" hidden>
-        <div class="capwrap"><video id="capVideo" muted playsinline></video><canvas id="capRoi"></canvas></div>
+        <div class="capwrap"><video id="capVideo" muted playsinline></video><img id="capImg" alt="" hidden><canvas id="capRoi"></canvas></div>
         <div class="row" style="margin-top:8px; align-items:flex-start">
           <canvas id="capSig" width="24" height="32" title="What the reader sees"></canvas>
           <div style="flex:1; display:flex; flex-direction:column; gap:6px">
             <div id="capRead" class="muted"></div>
             <div class="learned" id="capLearned"></div>
+            <div class="row" id="capBoardRow" hidden>
+              <label class="row"><input type="checkbox" id="capBoard"> <span class="muted">Check the board after each move (blue boxes)</span></label>
+              <span id="capBoardState" class="hint"></span>
+            </div>
             <div class="row">
               <button class="btn dark" id="btnCapEmpty" title="Teach what the box looks like with no card in it">Box is empty now</button>
               <button class="btn dark" id="btnCapForget">Forget cards</button>
@@ -363,6 +384,7 @@
         <div class="hint" style="margin-top:6px">Drag a tight box around the rank in the corner of the card you're dealt (the one waiting to be placed).
           The first time each card shows, the reader asks: tap it on the picker (here or in the pop-out) and it learns it. If it ever misreads,
           tap the right card and it learns that too.</div>
+        <details style="margin-top:6px"><summary class="hint">Reader log</summary><pre id="capLog" class="hint" style="max-height:180px; overflow:auto; margin:6px 0 0; white-space:pre-wrap"></pre></details>
       </div>
     </div>
 

@@ -56,8 +56,10 @@ function workerMain(scope) {
     return {
       objective: 'payout',
       curve: Object.assign({}, E.DEFAULT_CURVE),
-      mode: 'cash', // 'cash': payout curve; 'streak': pass every game's target to win streakGame.payout
+      mode: 'cash', // 'cash': payout curve; 'streak': pass every game's target to win streakGame.payout; 'h2h': 1v1
       streakGame: { targets: [6350, 7751], payout: 3, game: 0 },
+      h2h: { win: 0.4, opp: 0 }, // win: earned on top of the entry back; opp: typical opponent score (0 = advisor median)
+      boost: 0, // cash: payout booster, % added to the whole payout (score thresholds unchanged)
       rules: Object.assign({}, E.DEFAULT_RULES),
       thinkSec: 3,
       workers: Math.max(1, Math.min(12, (navigator.hardwareConcurrency || 4) - 1)),
@@ -81,18 +83,52 @@ function workerMain(scope) {
   settings.rules = Object.assign({}, E.DEFAULT_RULES, settings.rules);
   if (!settings.curve || !(settings.curve.be > 0)) settings.curve = Object.assign({}, E.DEFAULT_CURVE); // pre-exponential saves
   settings.streakGame = Object.assign(defaultSettings().streakGame, settings.streakGame);
+  settings.h2h = Object.assign(defaultSettings().h2h, settings.h2h);
   const isStreak = () => settings.mode === 'streak';
+  const isH2H = () => settings.mode === 'h2h';
   const target = () => settings.streakGame.targets[Math.min(settings.streakGame.game, settings.streakGame.targets.length - 1)];
   let ctx = E.makeContext(settings.rules, ENGINE_PARAMS);
+
+  // ---------- 1v1 opponent model ----------
+  // The opponent's final score is unknown until both games end. Model it as the advisor's own full-game score
+  // sample, shifted so its median sits at the typical opponent score; opponent bust-outs score 0. Each sample is
+  // blurred by OPP_SD so win chance rises smoothly with score (rollouts need a gradient); equal scores count half.
+  const OPP_SD = 250;
+  function normCdf(x) {
+    const t = 1 / (1 + 0.2316419 * Math.abs(x));
+    const p = 0.3989423 * Math.exp((-x * x) / 2) * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+    return x > 0 ? 1 - p : p;
+  }
+  const sampleMedian = () => {
+    const ok = ADVISOR_SCORES.filter((s) => s >= 0).sort((a, b) => a - b);
+    return ok[ok.length >> 1];
+  };
+  const typicalOpp = (v) => (v > 0 ? v : sampleMedian());
+  const oppSample = (typical) => ADVISOR_SCORES.map((s) => (s < 0 ? 0 : s + typical - sampleMedian()));
+  function winChance(s, opp) {
+    let w = 0;
+    for (const o of opp) w += normCdf((s - o) / OPP_SD);
+    return w / opp.length;
+  }
 
   // ---------- payout lookup ----------
   let payTab = null;
   let BE = 4700;
   let MAXS = 7900;
-  // Utility per final score: the cash curve, or 1/0 for passing this game's target in streak mode.
+  // Cash payout booster: the whole payout times (1 + boost%); the score thresholds stay where they are.
+  const boostFactor = (pct) => 1 + (pct > 0 ? pct : 0) / 100;
+  const cashPayout = (score) => E.payout(score, settings.curve) * boostFactor(settings.boost);
+  // Utility per final score: the cash curve, a shaped curve around this game's target in streak mode, or the
+  // chance to beat the opponent in 1v1.
   function rebuildPayout() {
     const c = settings.curve;
     payTab = new Float64Array(30001);
+    if (isH2H()) {
+      const opp = oppSample(typicalOpp(settings.h2h.opp));
+      for (let s = 0; s <= 30000; s++) payTab[s] = s % 10 ? payTab[s - (s % 10)] : winChance(s, opp);
+      BE = MAXS = typicalOpp(settings.h2h.opp);
+      return;
+    }
     if (isStreak()) {
       // Rank moves by a smooth, mostly linear score curve whose 1x point sits 1,250 below the target, not by
       // pass/fail. 240-game tests at a 7,751 target: pass/fail utility beat it 35%, a curve anchored at the
@@ -103,7 +139,7 @@ function workerMain(scope) {
       BE = MAXS = t;
       return;
     }
-    for (let s = 0; s <= 30000; s++) payTab[s] = E.payout(s, c);
+    for (let s = 0; s <= 30000; s++) payTab[s] = E.payout(s, c) * boostFactor(settings.boost);
     BE = c.be;
     MAXS = c.s27;
   }
@@ -401,16 +437,19 @@ function workerMain(scope) {
     return [`Column becomes ${totalText(nc)} · ${n} card${n === 1 ? '' : 's'}`, ''];
   }
 
-  const evText = (x) => (settings.objective === 'score' ? fmt(x) : isStreak() ? pct(x) : x.toFixed(3) + 'x');
-  const diffText = (x) => (settings.objective === 'score' ? fmt(x) : isStreak() ? (100 * x).toFixed(1) + 'pt' : x.toFixed(3));
-  const evLabel = () => (settings.objective === 'score' ? 'Avg score' : isStreak() ? 'Chance to beat target' : 'Expected payout');
+  const pctText = () => isStreak() || isH2H();
+  const evText = (x) => (settings.objective === 'score' ? fmt(x) : pctText() ? pct(x) : x.toFixed(3) + 'x');
+  const diffText = (x) => (settings.objective === 'score' ? fmt(x) : pctText() ? (100 * x).toFixed(1) + 'pt' : x.toFixed(3));
+  const evLabel = () => (settings.objective === 'score' ? 'Avg score' : isStreak() ? 'Chance to beat target' : isH2H() ? 'Chance to win' : 'Expected payout');
   const reachRows = (row) =>
     isStreak()
       ? [[`Beat ${fmt(BE)}`, `<span class="mono">${pct(row.pBE)}</span>`]]
-      : [
-          [`Reach ${fmt(BE)} (1x)`, `<span class="mono">${pct(row.pBE)}</span>`],
-          [`Reach ${fmt(MAXS)} (max)`, `<span class="mono">${pct(row.pMax)}</span>`],
-        ];
+      : isH2H()
+        ? [[`Beat ${fmt(BE)} (typical opponent)`, `<span class="mono">${pct(row.pBE)}</span>`]]
+        : [
+            [`Reach ${fmt(BE)} (1x)`, `<span class="mono">${pct(row.pBE)}</span>`],
+            [`Reach ${fmt(MAXS)} (max)`, `<span class="mono">${pct(row.pMax)}</span>`],
+          ];
 
   function verdict(st) {
     if (!st || !st.n) return null;
@@ -464,23 +503,26 @@ function workerMain(scope) {
           <div class="res ${passed ? 's-success' : 's-error'}">${lost ? 'Lost on busts' : fmt(G.score) + ' points'} vs target ${fmt(target())}</div>
           <div class="row" style="margin-top:12px"><button class="btn gold sm" id="btnNew2">${more ? `Start game ${sg.game + 2} (target ${fmt(sg.targets[sg.game + 1])})` : 'New streak'}</button></div>`;
         $('btnNew2').onclick = () => {
-          sg.game = more ? sg.game + 1 : 0;
-          save(LS_SET, settings);
-          rebuildPayout();
-          renderPayoutInputs();
-          snapshot();
-          G = newGame();
+          nextGame();
           Vision.rearm();
-          commit();
         };
         return;
       }
-      const m = lost ? 0 : E.payout(G.score, settings.curve);
+      const ended = kv([['Ended by', G.busts >= R.maxBusts ? `${R.maxBusts} busts` : 'all 52 cards played']]);
+      const btn = '<div class="row" style="margin-top:12px"><button class="btn gold sm" id="btnNew2">New game</button></div>';
+      if (isH2H()) {
+        const w = payTab[Math.min(30000, Math.max(0, G.score))];
+        p.innerHTML = `<div class="ph">Game over</div>
+          <div class="move">${lost ? 'Lost on busts' : fmt(G.score) + ' points'}</div>
+          <div class="res ${w >= 0.5 ? 's-success' : 's-error'}">About ${pct(w)} chance you beat a typical opponent</div>${ended}${matchFormHtml()}${btn}`;
+        $('btnNew2').onclick = newGameClick;
+        bindMatchForm(lost);
+        return;
+      }
+      const m = lost ? 0 : cashPayout(G.score);
       p.innerHTML = `<div class="ph">Game over</div>
         <div class="move">${lost ? 'Lost on busts' : fmt(G.score) + ' points'}</div>
-        <div class="res ${m >= 1 ? 's-success' : 's-error'}">${m.toFixed(2)}x your entry</div>
-        ${kv([['Ended by', G.busts >= R.maxBusts ? `${R.maxBusts} busts` : 'all 52 cards played']])}
-        <div class="row" style="margin-top:12px"><button class="btn gold sm" id="btnNew2">New game</button></div>`;
+        <div class="res ${m >= 1 ? 's-success' : 's-error'}">${m.toFixed(2)}x your entry</div>${ended}${btn}`;
       $('btnNew2').onclick = newGameClick;
       return;
     }
@@ -493,7 +535,7 @@ function workerMain(scope) {
         ${
           row
             ? kv([
-                [isStreak() ? 'Chance to beat target' : 'Game value now', `<span class="mono">${isStreak() ? pct(row.pBE) : evText(row.ev)}</span>`],
+                [isStreak() ? 'Chance to beat target' : isH2H() ? 'Chance to win' : 'Game value now', `<span class="mono">${isStreak() ? pct(row.pBE) : evText(row.ev)}</span>`],
                 ['Avg final score', `<span class="mono">${fmt(row.meanScore)}</span>`],
                 ...reachRows(row),
                 ['Simulations', sims],
@@ -543,7 +585,13 @@ function workerMain(scope) {
   function renderMoves() {
     const el = $('moves');
     $('movesNote').textContent =
-      settings.objective === 'score' ? 'All moves · by expected score' : isStreak() ? 'All moves · by chance to beat target' : 'All moves · by expected payout';
+      settings.objective === 'score'
+        ? 'All moves · by expected score'
+        : isStreak()
+          ? 'All moves · by chance to beat target'
+          : isH2H()
+            ? 'All moves · by chance to win'
+            : 'All moves · by expected payout';
     const st = cur && cur.stats;
     if (!G.current || isOver() || !st || !st.n) {
       el.innerHTML = `<div class="empty"><b>${isOver() ? 'Game over' : G.current ? 'Simulating…' : 'No card yet'}</b>
@@ -551,8 +599,8 @@ function workerMain(scope) {
       return;
     }
     const rows = st.rows.map((r, j) => Object.assign({ j }, r)).sort((a, b) => b.ev - a.ev);
-    const two = !isStreak();
-    el.innerHTML = `<table><thead><tr><th>Move</th><th class="e">${settings.objective === 'score' ? 'Avg' : isStreak() ? 'Beat' : 'EV'}</th>
+    const two = !isStreak() && !isH2H();
+    el.innerHTML = `<table><thead><tr><th>Move</th><th class="e">${settings.objective === 'score' ? 'Avg' : isStreak() ? 'Beat' : isH2H() ? 'Win' : 'EV'}</th>
       <th class="e">vs best</th><th class="e">Avg score</th>${two ? `<th class="e">≥ ${fmt(BE)}</th><th class="e">≥ ${fmt(MAXS)}</th>` : ''}</tr></thead><tbody>
       ${rows
         .slice(0, 8)
@@ -578,12 +626,15 @@ function workerMain(scope) {
   // ---------- screen capture: read the dealt card, assume the advised move was played ----------
   let autoCard = null; // G.current entered by the reader; picking a different card corrects it and teaches the reader
   let askCard = false; // the reader saw a new card it doesn't know yet
+  let quietUnknown = false; // all cards learned and the box shows something else: no game on screen (a pick still counts)
   let spokenId = 0;
   let readerText = '';
 
   // The player made the advised move on the phone before the next card showed.
   function advance() {
+    lastPre = null;
     if (!G.current || isOver()) return;
+    lastPre = JSON.stringify(G);
     if (cur && cur.chunks.length) cur.stats = computeStats();
     let r = recommended();
     if (!r) {
@@ -593,46 +644,251 @@ function workerMain(scope) {
     place(r.col, r.stay);
   }
 
+  // Starts the game after one that just ended (streak: the next target if this one was beaten).
+  function nextGame() {
+    if (isStreak()) {
+      const sg = settings.streakGame;
+      const lost = G.busts >= settings.rules.maxBusts && settings.rules.bustOutLoses;
+      sg.game = !lost && G.score >= target() && sg.game < sg.targets.length - 1 ? sg.game + 1 : 0;
+      save(LS_SET, settings);
+      rebuildPayout();
+      renderPayoutInputs();
+    }
+    snapshot();
+    G = newGame();
+    commit();
+  }
+
+  // In a game = the box shows a known card. Once every card is learned, anything else is a menu, lobby or
+  // results screen and is ignored; until then unknown images are asked about so they can be taught.
   function onSeen(face, first) {
     if (first && G.current && G.current.label === face) return; // capture started on a card already entered
-    if (askCard) toast('Missed a card', 'Fix the board with Edit state', true);
     if (!face) {
+      if (Vision.learnedAll()) {
+        quietUnknown = true;
+        return;
+      }
+      if (askCard) toast('Missed a card', 'Fix the board with Edit state', true);
       askCard = true;
       renderRec();
       say('Which card?');
       return;
     }
-    askCard = false;
+    if (askCard) toast('Missed a card', 'Fix the board with Edit state', true);
+    askCard = quietUnknown = false;
+    if (isOver()) {
+      // A card after the game ended: a new game is on screen. In 1v1, the last match must be logged first.
+      if (isH2H() && matchLog !== null && !G.logged) {
+        toast('Log the last match', 'then press New game', true);
+        return;
+      }
+      nextGame();
+      toast('New game', 'detected on screen');
+    }
     advance();
     enterCard(face);
     autoCard = G.current;
+    checkBoard();
   }
 
   // Card picked by hand (picker, keyboard, pop-out).
   function pickCard(face) {
-    if (askCard) {
-      askCard = false;
+    if (askCard || quietUnknown) {
+      askCard = quietUnknown = false;
       Vision.learn(face);
       advance();
       enterCard(face);
+      checkBoard();
       return;
     }
     if (autoCard && G.current === autoCard && face !== autoCard.label) Vision.learn(face);
     enterCard(face);
   }
 
+  // ---------- board check: after each move, read the column totals and cards-left count off the screen ----------
+  // Numbers are learned from the advisor's own board while it agrees with the screen. When the totals disagree:
+  // columns in a different order are re-aligned to the screen (an equivalent column was used); otherwise the move
+  // actually made is looked for among the legal moves from the previous board and replayed; failing that, it asks
+  // for a check. A wrong cards-left count means a card was missed or counted twice.
+  let lastPre = null; // game JSON just before the reader's assumed move
+  let boardSeq = 0;
+  const PERMS = (() => {
+    const out = [];
+    const build = (p, rest) => (rest.length ? rest.forEach((x, i) => build([...p, x], rest.filter((_, j) => j !== i))) : out.push(p));
+    build([], [0, 1, 2, 3]);
+    const moved = (p) => p.filter((x, i) => x !== i).length;
+    return out.sort((a, b) => moved(a) - moved(b)); // identity first
+  })();
+  const colTotals = (cols) => cols.map((cards) => (cards.length ? E.bestTotal(colCode(cards)) : 0));
+  // Does number n fit reading pattern pat ('?' = digit not learned yet; null = nothing readable)?
+  const fits = (n, pat) => pat === null || (String(n).length === pat.length && [...pat].every((ch, j) => ch === '?' || ch === String(n)[j]));
+  // Column order p (screen column i shows advisor column p[i]) under which exp fits the readings obs; or null.
+  const alignment = (exp, obs) => PERMS.find((p) => p.every((src, i) => fits(exp[src], obs[i]))) || null;
+  const isIdentity = (p) => p.every((x, i) => x === i);
+
+  function setBoard(text, tone) {
+    const el = $('capBoardState');
+    el.textContent = text;
+    el.className = 'hint' + (tone ? ' s-' + tone : '');
+  }
+
+  async function checkBoard() {
+    if (!Vision.boardOn()) return;
+    const seq = ++boardSeq;
+    const pre = lastPre;
+    for (let tries = 0; tries < 4; tries++) {
+      const r = await Vision.readBoard(tries ? 500 : 1200); // let the placed card and totals finish animating
+      if (seq !== boardSeq || !r) return; // a newer card arrived, or no frames
+      if (r.stable) return judgeBoard(r, pre);
+    }
+    setBoard('Board: still moving, not checked', 'muted');
+  }
+
+  function judgeBoard(r, pre) {
+    if (isOver() || !G.current) return;
+    const obs = r.totals.map((t) => t.pat);
+    let p = alignment(colTotals(G.cols), obs);
+    let note = '';
+    if (!p && pre) {
+      // The board differs from the advised move: find what actually happened from the previous board. First the
+      // legal moves with the card as read, then (a misread card) the same with every other rank still unseen.
+      const P = JSON.parse(pre);
+      const S = E.makeState(P.cols.map(colCode), P.busts, P.staysLeft, P.streak, P.score);
+      const fitting = (r) =>
+        E.enumActions(ctx, S, r)
+          .filter((a) => {
+            const T = S.slice();
+            E.step(ctx, T, a.a, r);
+            return alignment(Array.from(T.subarray(0, 4), (code) => (code ? E.bestTotal(code) : 0)), obs);
+          })
+          .map((a) => Object.assign(a, { r }));
+      let found = fitting(P.current.r);
+      if (!found.length)
+        found = E.RANK_LABELS.flatMap((_, r) => (r !== P.current.r && P.deck[r] > 0 ? fitting(r) : []));
+      // Only a unique explanation is used; between several, the one without a STAY (a stay is never assumed).
+      if (found.length > 1) found = found.filter((a) => a.stay < 0);
+      if (found.length === 1) {
+        const label = G.current.label;
+        const a = found[0];
+        if (a.r !== P.current.r) {
+          // The previous card was misread: swap it in the unseen counts.
+          P.deck[P.current.r]++;
+          P.deck[a.r]--;
+          note = `that card was a ${E.RANK_LABELS[a.r]}, not ${P.current.label} · `;
+          P.current = { r: a.r, label: E.RANK_LABELS[a.r] };
+        }
+        G = P;
+        place(a.col, a.stay);
+        enterCard(label);
+        autoCard = G.current;
+        p = alignment(colTotals(G.cols), obs);
+        note += a.stay >= 0 ? `you stayed ${a.stay + 1} and played ${a.col + 1}` : `played on column ${a.col + 1}`;
+      }
+    }
+    if (!p) {
+      setBoard(`Board: screen ${obs.map((v) => v ?? '?').join(' ')} · advisor ${colTotals(G.cols).join(' ')}`, 'error');
+      toast('Board mismatch', 'Fix it with Undo or Edit state', true);
+      say('Check the board');
+      return;
+    }
+    if (!isIdentity(p)) {
+      snapshot();
+      G.cols = p.map((src) => G.cols[src]);
+      commit();
+      if (!note) note = 'columns re-aligned';
+    }
+    if (note) {
+      toast('Board corrected', note);
+      say('Board corrected');
+    }
+    // Board agrees: learn digits not read yet, then check the cards-left count.
+    const exp = colTotals(G.cols);
+    r.totals.forEach((t, i) => Vision.learnNumber('total', exp[i], t));
+    const left = deckTotal();
+    if (!fits(left, r.deck.pat)) {
+      setBoard(`Board: screen has ${r.deck.pat} cards left, advisor ${left}`, 'error');
+      toast('Card count is off', `Screen ${r.deck.pat} left, advisor ${left}: a card was missed or counted twice`, true);
+      say('Card count is off');
+      return;
+    }
+    Vision.learnNumber('deck', left, r.deck);
+    const unread = [...obs, r.deck.pat].filter((v) => v === null || v.includes('?')).length;
+    setBoard(note ? `Board ✓ (${note})` : unread ? `Board ✓ (still learning ${unread} number${unread === 1 ? '' : 's'})` : 'Board ✓', 'success');
+  }
+
+  // Speech: one phrase at a time, each finishing before the next starts. Guards against Chrome's
+  // speechSynthesis dropping phrases: cancel()+speak() races (no cancel here), flaky network voices (a local
+  // voice is preferred), utterances garbage-collected before onend, onend never firing (deadline), and
+  // "not-allowed" until the page has had a click (the phrase waits for the next click or key).
+  const speech = { queue: [], busy: false, blocked: false, voice: null, keep: null, finish: null, deadline: 0, timer: 0 };
+  function pickVoice() {
+    const en = speechSynthesis.getVoices().filter((v) => /^en/i.test(v.lang));
+    speech.voice = en.find((v) => v.localService && v.default) || en.find((v) => v.localService) || en[0] || null;
+  }
+  if (window.speechSynthesis) {
+    pickVoice();
+    speechSynthesis.addEventListener('voiceschanged', pickVoice);
+  }
+  function unblockSpeech() {
+    if (!speech.blocked) return;
+    speech.blocked = false;
+    speakNext();
+  }
+  for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, unblockSpeech, true);
   function say(text) {
     if (!settings.speak || !Vision.active() || !window.speechSynthesis) return;
-    speechSynthesis.cancel();
+    if (speech.queue[speech.queue.length - 1] === text) return;
+    speech.queue.push(text);
+    if (speech.busy && performance.now() > speech.deadline) {
+      speechSynthesis.cancel(); // stuck: onend never came
+      speech.finish();
+    } else if (!speech.busy) speakNext();
+  }
+  function speakNext() {
+    if (speech.busy || speech.blocked || !speech.queue.length) return;
+    if (navigator.userActivation && !navigator.userActivation.hasBeenActive) {
+      speech.blocked = true;
+      toast('Voice is off', 'Click the advisor page once to turn it on', true);
+      return;
+    }
+    const text = speech.queue.shift();
     const u = new SpeechSynthesisUtterance(text);
+    if (speech.voice) u.voice = speech.voice;
     u.rate = 1.1;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(speech.timer);
+      speech.busy = false;
+      speech.keep = null;
+      speakNext();
+    };
+    u.onend = finish;
+    u.onerror = (e) => {
+      if (e.error === 'not-allowed' && !done) {
+        speech.queue.unshift(text);
+        speech.blocked = true;
+      }
+      finish();
+    };
+    speech.busy = true;
+    speech.keep = u;
+    speech.finish = finish;
+    const ms = 3000 + 150 * text.length; // generous: only for an engine that never reports the end
+    speech.deadline = performance.now() + ms;
+    speech.timer = setTimeout(() => {
+      speechSynthesis.cancel();
+      finish();
+    }, ms);
+    speechSynthesis.resume(); // clears a stuck paused state
     speechSynthesis.speak(u);
   }
   function announce() {
     const r = recommended();
     if (!r || spokenId === cur.id) return;
     spokenId = cur.id;
-    say(r.stay >= 0 ? `Stay ${r.stay + 1}, then column ${r.col + 1}` : `Column ${r.col + 1}`);
+    say(r.stay < 0 ? `Column ${r.col + 1}` : `Stay! Stay column ${r.stay + 1}, then place in column ${r.col + 1}`);
   }
 
   // Always-on-top advice window to keep over the mirroring app.
@@ -661,6 +917,7 @@ function workerMain(scope) {
     for (const b of d.querySelectorAll('[data-face]')) b.onclick = () => pickCard(b.dataset.face);
     d.getElementById('pipUndo').onclick = undo;
     d.addEventListener('keydown', onKey);
+    for (const ev of ['pointerdown', 'keydown']) d.addEventListener(ev, unblockSpeech, true);
     pip.addEventListener('pagehide', () => (pip = null));
     renderPip();
   }
@@ -696,18 +953,28 @@ function workerMain(scope) {
 
   function renderStatus() {
     const R = settings.rules;
-    const m = E.payout(G.score, settings.curve);
+    const m = cashPayout(G.score);
     let hex = '';
     for (let i = 0; i < R.maxBusts; i++) hex += `<span class="hex${i < G.busts ? ' on' : ''}"></span>`;
     let stays = '';
     for (let i = 0; i < R.stays; i++) stays += `<span class="staytok${i < G.staysLeft ? '' : ' used'}">STAY</span>`;
     const next = R.streakBase + R.streakInc * Math.max(0, G.streak - 1);
     const sg = settings.streakGame;
-    const sub = isStreak() ? (G.score >= target() ? '<small class="s-success">✓ target</small>' : `<small>need ${fmt(target() - G.score)}</small>`) : `<small>${m.toFixed(2)}x</small>`;
+    const sub = isStreak()
+      ? G.score >= target()
+        ? '<small class="s-success">✓ target</small>'
+        : `<small>need ${fmt(target() - G.score)}</small>`
+      : isH2H()
+        ? `<small>vs ~${fmt(BE)}</small>`
+        : `<small>${m.toFixed(2)}x</small>`;
     $('status').innerHTML = `<div class="pill" title="Busts">${hex}</div>
       <div class="pill" title="Stays left">${stays || '<small>no stays</small>'}</div>
       <div class="pill" title="Score"><span class="chip"></span>${fmt(G.score)}${sub}</div>`;
-    const where = isStreak() ? `Streak game ${sg.game + 1} of ${sg.targets.length} · target ${fmt(target())}` : `1x at ${fmt(BE)} · max at ${fmt(MAXS)}`;
+    const where = isStreak()
+      ? `Streak game ${sg.game + 1} of ${sg.targets.length} · target ${fmt(target())}`
+      : isH2H()
+        ? `1v1 · typical opponent ${fmt(BE)}`
+        : `1x at ${fmt(BE)} · max at ${fmt(MAXS)}`;
     $('meta').innerHTML = G.streak
       ? `<span class="s-accent">On a roll ×${G.streak}</span> · score this turn for +${next} · ${where}`
       : `Turn ${G.turn + 1} · ${where}`;
@@ -848,12 +1115,18 @@ function workerMain(scope) {
     $('pBE').value = settings.curve.be;
     $('p22').value = settings.curve.s22;
     $('p27').value = settings.curve.s27;
+    $('pBoost').value = settings.boost || 0;
     $('pEntry').value = settings.entry || 10;
     if (document.activeElement !== $('sTargets')) $('sTargets').value = sg.targets.join(', ');
     $('sPayout').value = sg.payout;
     for (const b of $('modeSeg').querySelectorAll('button')) b.classList.toggle('on', b.dataset.mode === settings.mode);
-    $('cashBox').style.display = isStreak() ? 'none' : '';
+    $('cashBox').style.display = settings.mode === 'cash' ? '' : 'none';
     $('streakBox').style.display = isStreak() ? '' : 'none';
+    $('h2hBox').style.display = isH2H() ? '' : 'none';
+    $('hWin').value = settings.h2h.win;
+    $('hOpp').value = settings.h2h.opp || '';
+    $('hOpp').placeholder = fmt(sampleMedian());
+    $('hOppHint').textContent = `Typical opponent = the score a usual opponent finishes on. Blank assumes they play as well as the advisor (about ${fmt(sampleMedian())}); set it to what your opponents actually score once you've seen a few results.`;
     $('sSteps').innerHTML = sg.targets
       .map(
         (t, i) => `<button data-game="${i}" class="${i === sg.game ? 'on' : i < sg.game ? 'done' : ''}" title="Set the game you are on">
@@ -883,6 +1156,11 @@ function workerMain(scope) {
     const payout = Number($('sPayout').value);
     return targets.length && targets.every((t) => t > 0) && payout > 0 ? { targets, payout } : null;
   }
+  function readH2HInputs() {
+    const win = Number($('hWin').value);
+    const opp = $('hOpp').value.trim() === '' ? 0 : Number($('hOpp').value);
+    return win > 0 && opp >= 0 ? { win, opp } : null;
+  }
   // Expected payout from games played start to finish with the advisor (sample of final scores).
   function renderEV() {
     const entry = Number($('pEntry').value) || 0;
@@ -894,6 +1172,7 @@ function workerMain(scope) {
     let ev;
     let rows;
     let label = 'Your EV this game';
+    const money = (x) => '$' + x.toFixed(2);
     if (isStreak()) {
       const s = readStreakInputs();
       if (!s) return void ($('evLine').innerHTML = '');
@@ -907,10 +1186,22 @@ function workerMain(scope) {
       rows.push(['Win the streak', `<span class="mono">${pct(p)}</span> <span class="muted">× ${s.payout}x</span>`]);
       ev = p * s.payout;
       label = from > 0 ? `Your EV from game ${from + 1}` : 'Your EV this streak';
+    } else if (isH2H()) {
+      const h = readH2HInputs();
+      if (!h || !entry) return void ($('evLine').innerHTML = '');
+      const opp = oppSample(typicalOpp(h.opp));
+      const pWin = xs.reduce((a, s) => a + winChance(Math.max(0, s), opp), 0) / n;
+      const back = entry + h.win;
+      ev = (pWin * back) / entry;
+      rows = [
+        [`Win vs typical opponent (${fmt(typicalOpp(h.opp))})`, `<span class="mono">${pct(pWin)}</span>`],
+        ['A win returns', `<span class="mono">${money(back)}</span> <span class="muted">${money(entry)} entry back + ${money(h.win)}</span>`],
+        ['Break-even win rate', `<span class="mono">${pct(entry / back)}</span>`],
+      ];
     } else {
       const c = readCurveInputs();
       if (!c) return void ($('evLine').innerHTML = '');
-      ev = xs.reduce((a, s) => a + (s < 0 ? 0 : E.payout(s, c)), 0) / n;
+      ev = (xs.reduce((a, s) => a + (s < 0 ? 0 : E.payout(s, c)), 0) / n) * boostFactor(Number($('pBoost').value));
       rows = [
         [`Reach ${fmt(c.be)} (1x)`, `<span class="mono">${pct(passRate(c.be))}</span>`],
         [`Reach ${fmt(c.s22)} (2.2x)`, `<span class="mono">${pct(passRate(c.s22))}</span>`],
@@ -918,7 +1209,6 @@ function workerMain(scope) {
     }
     rows.push(['Lose on 3 busts', `<span class="mono">${pct(lostRate)}</span> <span class="muted">per game</span>`]);
     rows.push(['Based on', `<span class="muted">${n} full games played with the advisor</span>`]);
-    const money = (x) => '$' + x.toFixed(2);
     $('evLine').innerHTML = `<div class="big${ev < 1 ? ' neg' : ''}"><small>${label}</small><b class="${ev < 1 ? 's-error' : 's-success'}">${ev.toFixed(2)}x</b>
         <small>${entry ? `${money(entry * ev)} back on ${money(entry)} · ${ev >= 1 ? '+' : '−'}${money(Math.abs(entry * (ev - 1)))}` : ''}</small></div>
       ${kv(rows)}`;
@@ -941,14 +1231,24 @@ function workerMain(scope) {
       sg.targets = s.targets;
       sg.payout = s.payout;
       sg.game = Math.min(sg.game, s.targets.length - 1);
+    } else if (isH2H()) {
+      const h = readH2HInputs();
+      if (!h) {
+        $('payErr').textContent = 'Enter what a win earns (above 0); leave typical opponent blank or enter a score';
+        return;
+      }
+      if (h.win === settings.h2h.win && h.opp === settings.h2h.opp) return renderEV();
+      settings.h2h = h;
     } else {
       const c = readCurveInputs();
       if (!c) {
         $('payErr').textContent = 'Needs break even < 2.2x score < 2.7x score';
         return;
       }
-      if (c.be === settings.curve.be && c.s22 === settings.curve.s22 && c.s27 === settings.curve.s27) return renderEV();
+      const boost = Math.max(0, Number($('pBoost').value) || 0);
+      if (c.be === settings.curve.be && c.s22 === settings.curve.s22 && c.s27 === settings.curve.s27 && boost === settings.boost) return renderEV();
       settings.curve = c;
+      settings.boost = boost;
     }
     save(LS_SET, settings);
     rebuildPayout();
@@ -956,7 +1256,7 @@ function workerMain(scope) {
     render();
     analyze();
   }
-  for (const id of ['pBE', 'p22', 'p27', 'pEntry', 'sTargets', 'sPayout']) {
+  for (const id of ['pBE', 'p22', 'p27', 'pBoost', 'pEntry', 'sTargets', 'sPayout', 'hWin', 'hOpp']) {
     $(id).addEventListener('input', renderEV);
     $(id).addEventListener('change', applyPayoutInputs);
     $(id).addEventListener('keydown', (e) => {
@@ -1105,6 +1405,91 @@ function workerMain(scope) {
     e.preventDefault();
   }
   document.addEventListener('keydown', onKey);
+
+  // ---------- 1v1 match log: opponents, their scores and the bet, kept in data/advisor.db by the receiver ----------
+  let matchLog = null; // newest first; null when the page isn't served by the receiver
+  async function sendMatch(method, url, body) {
+    const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  }
+  function matchFormHtml() {
+    if (matchLog === null) return '<div class="hint" style="margin-top:8px">Start 21 Advisor Receiver to log 1v1 matches.</div>';
+    if (G.logged) return `<div class="hint s-success" style="margin-top:8px">Logged vs ${esc(G.logged)}</div>`;
+    return `<form id="formMatch" class="payrow" style="margin-top:10px">
+        <label class="pin wide"><span>Opponent</span><input name="opponent" list="oppNames" required autocomplete="off"></label>
+        <label class="pin"><span>Their score</span><input name="opponent_score" type="number" min="0" step="50" placeholder="later"></label>
+        <label class="pin"><span>Bet $</span><input name="bet" type="number" min="0" step="0.01" value="${settings.entry || ''}"></label>
+        <button class="btn gold sm">Log match</button>
+      </form><div class="err" id="matchErr"></div>`;
+  }
+  function bindMatchForm(lost) {
+    const f = $('formMatch');
+    if (!f) return;
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const row = await sendMatch('POST', 'receiver/matches', {
+          opponent: f.opponent.value,
+          opponent_score: f.opponent_score.value === '' ? null : Number(f.opponent_score.value),
+          my_score: G.score,
+          my_busted_out: lost ? 1 : 0,
+          bet: f.bet.value === '' ? null : Number(f.bet.value),
+          win: settings.h2h.win,
+          typical_opp: Math.round(BE),
+        });
+        matchLog.unshift(row);
+        G.logged = row.opponent;
+        persist();
+        renderMatches();
+        renderRec();
+      } catch (err) {
+        $('matchErr').textContent = 'Not saved: ' + err.message;
+      }
+    };
+  }
+  function renderMatches() {
+    $('matchPanel').hidden = false;
+    $('matchCount').textContent = `${matchLog.length} logged · data/advisor.db`;
+    $('oppNames').innerHTML = [...new Set(matchLog.map((m) => m.opponent))].map((n) => `<option value="${esc(n)}">`).join('');
+    if (!matchLog.length) {
+      $('matches').innerHTML = '<div class="empty"><b>No matches yet</b>Log one from the game-over panel in 1v1 mode.</div>';
+      return;
+    }
+    const tone = { win: 'success', loss: 'error', tie: 'muted' };
+    $('matches').innerHTML = `<table><thead><tr><th>When</th><th>Opponent</th><th class="e">Bet</th><th class="e">You</th><th class="e">Them</th><th>Result</th></tr></thead><tbody>
+      ${matchLog
+        .slice(0, 15)
+        .map(
+          (m) => `<tr><td>${esc(m.played_at.slice(5, 16))}</td><td>${esc(m.opponent)}</td><td class="e">${m.bet == null ? '' : '$' + m.bet.toFixed(2)}</td>
+            <td class="e">${fmt(m.my_score)}</td>
+            <td class="e">${m.opponent_score == null ? `<input class="oppfill" data-id="${m.id}" type="number" min="0" step="50" placeholder="add">` : fmt(m.opponent_score)}</td>
+            <td>${m.result ? `<span class="s-${tone[m.result]}">${m.result}</span>` : '<span class="dim">pending</span>'}</td></tr>`,
+        )
+        .join('')}</tbody></table>`;
+    for (const inp of $('matches').querySelectorAll('.oppfill'))
+      inp.onchange = async () => {
+        if (inp.value === '') return;
+        try {
+          const row = await sendMatch('PATCH', 'receiver/matches/' + inp.dataset.id, { opponent_score: Number(inp.value) });
+          matchLog[matchLog.findIndex((m) => m.id === row.id)] = row;
+          renderMatches();
+        } catch (err) {
+          toast('Not saved', err.message, true);
+        }
+      };
+  }
+  if (location.protocol.startsWith('http'))
+    fetch('receiver/matches', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((rows) => {
+        if (!Array.isArray(rows)) return;
+        matchLog = rows;
+        renderMatches();
+        renderRec();
+      })
+      .catch(() => {});
 
   renderPayoutInputs();
   render();
