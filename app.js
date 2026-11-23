@@ -61,6 +61,7 @@ function workerMain(scope) {
       rules: Object.assign({}, E.DEFAULT_RULES),
       thinkSec: 3,
       workers: Math.max(1, Math.min(12, (navigator.hardwareConcurrency || 4) - 1)),
+      speak: true,
     };
   }
   function load(k) {
@@ -249,11 +250,14 @@ function workerMain(scope) {
       workers.push(w);
     }
   }
+  // Ticks are driven by worker results rather than a timer: timers in a hidden tab are throttled, and the
+  // tab is usually hidden behind the mirroring window while the screen reader plays along.
   function onWorkerMsg(e) {
     const m = e.data;
     if (!cur || m.id !== cur.id || !cur.running) return;
     cur.chunks.push(new Int32Array(m.scores));
     cur.n += m.n;
+    if (performance.now() - cur.lastTick >= 200) tick();
   }
   function launch() {
     workers.forEach((w, i) =>
@@ -269,15 +273,10 @@ function workerMain(scope) {
       }),
     );
     cur.running = true;
-    clearInterval(cur.timer);
-    cur.timer = setInterval(tick, 200);
   }
   function stopWorkers() {
     workers.forEach((w) => w.postMessage({ cmd: 'stop' }));
-    if (cur) {
-      cur.running = false;
-      clearInterval(cur.timer);
-    }
+    if (cur) cur.running = false;
   }
 
   function analyze() {
@@ -297,7 +296,7 @@ function workerMain(scope) {
       return;
     }
     const budget = r >= 0 && actions.length > 1 ? settings.thinkSec * 1000 : 900;
-    cur = { id: ++jobId, S, cnt, r, actions, chunks: [], n: 0, t0: performance.now(), budget, running: false, timer: 0, stats: null };
+    cur = { id: ++jobId, S, cnt, r, actions, chunks: [], n: 0, t0: performance.now(), budget, running: false, lastTick: 0, stats: null };
     launch();
     renderRec();
   }
@@ -360,10 +359,14 @@ function workerMain(scope) {
     if (!cur) return;
     const st = computeStats();
     cur.stats = st;
+    cur.lastTick = performance.now();
     const el = performance.now() - cur.t0;
     let decided = st.n >= 800 && st.rows.length > 1;
     if (decided) for (let j = 0; j < st.rows.length; j++) if (j !== st.best && !(st.rows[j].diff > 4 * st.rows[j].se && st.rows[j].se > 0)) decided = false;
-    if (el >= cur.budget || decided) stopWorkers();
+    if (el >= cur.budget || decided) {
+      stopWorkers();
+      announce();
+    }
     renderRec();
   }
 
@@ -467,6 +470,7 @@ function workerMain(scope) {
           renderPayoutInputs();
           snapshot();
           G = newGame();
+          Vision.rearm();
           commit();
         };
         return;
@@ -571,6 +575,125 @@ function workerMain(scope) {
     if (r) place(r.col, r.stay);
   }
 
+  // ---------- screen capture: read the dealt card, assume the advised move was played ----------
+  let autoCard = null; // G.current entered by the reader; picking a different card corrects it and teaches the reader
+  let askCard = false; // the reader saw a new card it doesn't know yet
+  let spokenId = 0;
+  let readerText = '';
+
+  // The player made the advised move on the phone before the next card showed.
+  function advance() {
+    if (!G.current || isOver()) return;
+    if (cur && cur.chunks.length) cur.stats = computeStats();
+    let r = recommended();
+    if (!r) {
+      const a = E.greedy(ctx, stateS(), Int32Array.from(G.deck), deckTotal(), G.current.r);
+      r = { col: E.actCol(a), stay: E.actStay(a) };
+    }
+    place(r.col, r.stay);
+  }
+
+  function onSeen(face, first) {
+    if (first && G.current && G.current.label === face) return; // capture started on a card already entered
+    if (askCard) toast('Missed a card', 'Fix the board with Edit state', true);
+    if (!face) {
+      askCard = true;
+      renderRec();
+      say('Which card?');
+      return;
+    }
+    askCard = false;
+    advance();
+    enterCard(face);
+    autoCard = G.current;
+  }
+
+  // Card picked by hand (picker, keyboard, pop-out).
+  function pickCard(face) {
+    if (askCard) {
+      askCard = false;
+      Vision.learn(face);
+      advance();
+      enterCard(face);
+      return;
+    }
+    if (autoCard && G.current === autoCard && face !== autoCard.label) Vision.learn(face);
+    enterCard(face);
+  }
+
+  function say(text) {
+    if (!settings.speak || !Vision.active() || !window.speechSynthesis) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.1;
+    speechSynthesis.speak(u);
+  }
+  function announce() {
+    const r = recommended();
+    if (!r || spokenId === cur.id) return;
+    spokenId = cur.id;
+    say(r.stay >= 0 ? `Stay ${r.stay + 1}, then column ${r.col + 1}` : `Column ${r.col + 1}`);
+  }
+
+  // Always-on-top advice window to keep over the mirroring app.
+  let pip = null;
+  async function openPip() {
+    if (pip) return pip.focus();
+    if (!window.documentPictureInPicture) return toast('Not supported', 'Pop-out needs Chrome or Edge 116+', true);
+    pip = await documentPictureInPicture.requestWindow({ width: 420, height: 250 });
+    const d = pip.document;
+    for (const s of document.styleSheets) {
+      try {
+        const st = d.createElement('style');
+        st.textContent = Array.from(s.cssRules, (r) => r.cssText).join('\n');
+        d.head.append(st);
+      } catch {
+        const l = d.createElement('link');
+        l.rel = 'stylesheet';
+        l.href = s.href;
+        d.head.append(l);
+      }
+    }
+    d.body.className = 'pipbody';
+    d.body.innerHTML = `<div class="pip"><div class="pipcard" id="pipCard"></div><div class="tstatus" id="pipStatus"></div></div>
+      <div class="pipread" id="pipRead"></div>
+      <div class="picker pippick">${FACES.map((f) => `<button class="mini" data-face="${f}">${f}</button>`).join('')}<button class="mini undo" id="pipUndo">Undo</button></div>`;
+    for (const b of d.querySelectorAll('[data-face]')) b.onclick = () => pickCard(b.dataset.face);
+    d.getElementById('pipUndo').onclick = undo;
+    d.addEventListener('keydown', onKey);
+    pip.addEventListener('pagehide', () => (pip = null));
+    renderPip();
+  }
+  function renderPip() {
+    if (!pip) return;
+    const d = pip.document;
+    const ts = $('tableStatus');
+    const st = d.getElementById('pipStatus');
+    st.className = ts.className;
+    st.innerHTML = ts.innerHTML;
+    d.getElementById('pipCard').innerHTML = G.current ? cardHtml(G.current.label) : '';
+    d.getElementById('pipRead').textContent = readerText;
+  }
+
+  $('btnPip').onclick = openPip;
+  $('capSpeak').checked = settings.speak;
+  $('capSpeak').onchange = () => {
+    settings.speak = $('capSpeak').checked;
+    save(LS_SET, settings);
+  };
+  Vision.init({
+    faces: FACES,
+    onCard: onSeen,
+    onEmpty: () => {
+      askCard = false;
+      renderRec();
+    },
+    onStatus: (t) => {
+      readerText = t;
+      if (pip) pip.document.getElementById('pipRead').textContent = t;
+    },
+  });
+
   function renderStatus() {
     const R = settings.rules;
     const m = E.payout(G.score, settings.curve);
@@ -601,7 +724,7 @@ function workerMain(scope) {
         const sel = G.current && G.current.label === f;
         return `<button class="mini${sel ? ' on' : ''}" data-face="${f}" ${(G.deck[r] <= 0 && !sel) || !can ? 'disabled' : ''}>${f}<small>${G.deck[r]}</small></button>`;
       }).join('');
-    for (const b of $('cardBtns').querySelectorAll('button')) b.onclick = () => enterCard(b.dataset.face);
+    for (const b of $('cardBtns').querySelectorAll('button')) b.onclick = () => pickCard(b.dataset.face);
     const cc = $('curCard');
     if (G.current) {
       cc.className = 'slot has';
@@ -663,6 +786,9 @@ function workerMain(scope) {
     if (isOver()) {
       el.className = 'tstatus';
       el.innerHTML = '<span>Game over</span>';
+    } else if (askCard) {
+      el.className = 'tstatus stay';
+      el.innerHTML = '<span>New card — tap which one it is</span>';
     } else if (!G.current) {
       el.className = 'tstatus';
       el.innerHTML = '<span>Waiting for next card</span>';
@@ -677,6 +803,7 @@ function workerMain(scope) {
       el.className = 'tstatus go';
       el.innerHTML = `<span>✓ Place on column ${rec.col + 1}</span>`;
     }
+    renderPip();
   }
 
   function renderDeck() {
@@ -947,6 +1074,7 @@ function workerMain(scope) {
     if (G.turn > 0 && !isOver() && !confirm('Start a new game?')) return;
     snapshot();
     G = newGame();
+    Vision.rearm();
     commit();
   }
 
@@ -955,7 +1083,7 @@ function workerMain(scope) {
   $('btnEdit').onclick = openEdit;
   $('btnSettings').onclick = openSettings;
 
-  document.addEventListener('keydown', (e) => {
+  function onKey(e) {
     if (document.querySelector('dialog[open]') || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
     if (e.shiftKey && /^Digit[1-4]$/.test(e.code)) {
@@ -965,8 +1093,8 @@ function workerMain(scope) {
     }
     const k = e.key.toUpperCase();
     const map = { A: 'A', 1: 'A', 0: '10', T: '10', J: 'J', Q: 'Q', K: 'K' };
-    if (map[k]) enterCard(map[k]);
-    else if (/^[2-9]$/.test(k)) enterCard(k);
+    if (map[k]) pickCard(map[k]);
+    else if (/^[2-9]$/.test(k)) pickCard(k);
     else if (e.key === 'Enter') applyRec();
     else if (e.key === 'Backspace') undo();
     else if (k === 'L') extend();
@@ -975,7 +1103,8 @@ function workerMain(scope) {
     else if (e.key === ',') openSettings();
     else return;
     e.preventDefault();
-  });
+  }
+  document.addEventListener('keydown', onKey);
 
   renderPayoutInputs();
   render();
