@@ -705,13 +705,18 @@ function workerMain(scope) {
     enterCard(face);
   }
 
-  // ---------- board check: after each move, read the column totals and cards-left count off the screen ----------
-  // Numbers are learned from the advisor's own board while it agrees with the screen. When the totals disagree:
-  // columns in a different order are re-aligned to the screen (an equivalent column was used); otherwise the move
-  // actually made is looked for among the legal moves from the previous board and replayed; failing that, it asks
-  // for a check. A wrong cards-left count means a card was missed or counted twice.
+  // ---------- board check: the mirrored board is the truth ----------
+  // After every move, and every few seconds during a game, the screen is read: column totals, the cards in each
+  // column, cards left, score and busts. Whatever disagrees is fixed to match the screen:
+  //  1. columns in another order are renumbered (an equivalent column was used);
+  //  2. a different move than advised (or a misread card): the move that explains the screen is replayed;
+  //  3. otherwise the columns are rebuilt from the cards read off the screen and the unseen counts adjusted;
+  //  then score and busts are taken from the screen. What the reader can't read yet is learned from the advisor's
+  //  board whenever the two agree; only a board it can't read at all is left for you to fix.
   let lastPre = null; // game JSON just before the reader's assumed move
   let boardSeq = 0;
+  let boardBusy = false;
+  let tickN = 0;
   const PERMS = (() => {
     const out = [];
     const build = (p, rest) => (rest.length ? rest.forEach((x, i) => build([...p, x], rest.filter((_, j) => j !== i))) : out.push(p));
@@ -719,11 +724,22 @@ function workerMain(scope) {
     const moved = (p) => p.filter((x, i) => x !== i).length;
     return out.sort((a, b) => moved(a) - moved(b)); // identity first
   })();
-  const colTotals = (cols) => cols.map((cards) => (cards.length ? E.bestTotal(colCode(cards)) : 0));
-  // Does number n fit reading pattern pat ('?' = digit not learned yet; null = nothing readable)?
-  const fits = (n, pat) => pat === null || (String(n).length === pat.length && [...pat].every((ch, j) => ch === '?' || ch === String(n)[j]));
-  // Column order p (screen column i shows advisor column p[i]) under which exp fits the readings obs; or null.
-  const alignment = (exp, obs) => PERMS.find((p) => p.every((src, i) => fits(exp[src], obs[i]))) || null;
+  const colTotal = (cards) => (cards.length ? E.bestTotal(colCode(cards)) : 0);
+  const colTotals = (cols) => cols.map(colTotal);
+  // Does number n fit reading pattern pat ('?' = digit not learned yet; null = nothing readable)? Digits that ran
+  // together (fewer glyphs than digits, some unread) tell nothing; any other length difference is a mismatch.
+  const fits = (n, pat) =>
+    pat === null ||
+    (pat.includes('?') && pat.length < String(n).length) ||
+    (String(n).length === pat.length && [...pat].every((ch, j) => ch === '?' || ch === String(n)[j]));
+  // A column's cards against the screen: its total and how many cards are stacked there; when the total can't be
+  // fully read yet, also every rank the reader can name.
+  const fitsCol = (cards, col, pat) =>
+    fits(colTotal(cards), pat) &&
+    cards.length === col.n &&
+    ((pat !== null && !pat.includes('?')) || col.slots.every((s, k) => s.label === null || faceRank(s.label) === cards[k].r));
+  // Column order p (screen column i shows advisor column p[i]) under which `cols` fit the reading r; or null.
+  const alignment = (cols, r) => PERMS.find((p) => p.every((src, i) => fitsCol(cols[src], r.cols[i], r.totals[i].pat))) || null;
   const isIdentity = (p) => p.every((x, i) => x === i);
 
   function setBoard(text, tone) {
@@ -732,39 +748,76 @@ function workerMain(scope) {
     el.className = 'hint' + (tone ? ' s-' + tone : '');
   }
 
-  async function checkBoard() {
-    if (!Vision.boardOn()) return;
+  async function checkBoard(periodic) {
+    if (!Vision.boardOn() || (periodic && boardBusy)) return;
     const seq = ++boardSeq;
-    const pre = lastPre;
-    for (let tries = 0; tries < 4; tries++) {
-      const r = await Vision.readBoard(tries ? 500 : 1200); // let the placed card and totals finish animating
-      if (seq !== boardSeq || !r) return; // a newer card arrived, or no frames
-      if (r.stable) return judgeBoard(r, pre);
+    const pre = periodic ? null : lastPre;
+    boardBusy = true;
+    try {
+      for (let tries = 0; tries < (periodic ? 1 : 4); tries++) {
+        // after a move, let the placed card and totals finish animating
+        const r = await Vision.readBoard(periodic ? 0 : tries ? 500 : 1200);
+        if (seq !== boardSeq || !r) return; // a newer check started, or no frames
+        if (r.stable) return judgeBoard(r, pre, periodic);
+      }
+      setBoard('Board: still moving, not checked', 'muted');
+    } finally {
+      if (seq === boardSeq) boardBusy = false;
     }
-    setBoard('Board: still moving, not checked', 'muted');
   }
 
-  function judgeBoard(r, pre) {
+  // Columns after move a (stay a.stay, then card on a.col) from game state P.
+  function movedCols(P, a, card) {
+    const S = E.makeState(P.cols.map(colCode), P.busts, P.staysLeft, P.streak, P.score);
+    const cols = P.cols.map((c) => c.slice());
+    if (a.stay >= 0) cols[a.stay] = [];
+    if (E.step(ctx, S, a.a, card.r).type === 0) cols[a.col].push(card);
+    else cols[a.col] = [];
+    return cols;
+  }
+
+  // A legal move of the current card would produce the screen: it's being placed right now.
+  function pendingMove(r) {
+    return E.enumActions(ctx, stateS(), G.current.r).some((a) => alignment(movedCols(G, a, G.current), r));
+  }
+
+  // Rebuilds the columns from the cards read off the screen (every card must be readable and its column must add up
+  // to the total shown); the cards that left or joined the advisor's columns go back to / come out of the unseen counts.
+  function syncColumns(r) {
+    const cols = [];
+    for (const col of r.cols) {
+      if (col.slots.some((s) => s.label === null)) return false;
+      cols.push(col.slots.map((s) => ({ r: faceRank(s.label), label: s.label })));
+    }
+    if (cols.some((cards) => colCode(cards) < 0) || !cols.every((cards, i) => fitsCol(cards, r.cols[i], r.totals[i].pat))) return false;
+    const deck = G.deck.slice();
+    for (const cards of G.cols) for (const x of cards) deck[x.r]++;
+    for (const cards of cols) for (const x of cards) deck[x.r]--;
+    snapshot();
+    G.cols = cols;
+    G.deck = deck.map((n, i) => Math.min(E.FULL_DECK[i], Math.max(0, n)));
+    commit();
+    return true;
+  }
+
+  function judgeBoard(r, pre, periodic) {
     if (isOver() || !G.current) return;
     const obs = r.totals.map((t) => t.pat);
-    let p = alignment(colTotals(G.cols), obs);
-    let note = '';
+    let p = alignment(G.cols, r);
+    const notes = [];
+    if (!p && periodic && pendingMove(r)) return; // its new-card check follows
     if (!p && pre) {
       // The board differs from the advised move: find what actually happened from the previous board. First the
       // legal moves with the card as read, then (a misread card) the same with every other rank still unseen.
       const P = JSON.parse(pre);
       const S = E.makeState(P.cols.map(colCode), P.busts, P.staysLeft, P.streak, P.score);
-      const fitting = (r) =>
-        E.enumActions(ctx, S, r)
-          .filter((a) => {
-            const T = S.slice();
-            E.step(ctx, T, a.a, r);
-            return alignment(Array.from(T.subarray(0, 4), (code) => (code ? E.bestTotal(code) : 0)), obs);
-          })
-          .map((a) => Object.assign(a, { r }));
+      const fitting = (rk) =>
+        E.enumActions(ctx, S, rk)
+          .filter((a) => alignment(movedCols(P, a, { r: rk, label: E.RANK_LABELS[rk] }), r))
+          .map((a) => Object.assign(a, { r: rk }));
       let found = fitting(P.current.r);
       if (!found.length)
-        found = E.RANK_LABELS.flatMap((_, r) => (r !== P.current.r && P.deck[r] > 0 ? fitting(r) : []));
+        found = E.RANK_LABELS.flatMap((_, rk) => (rk !== P.current.r && P.deck[rk] > 0 ? fitting(rk) : []));
       // Only a unique explanation is used; between several, the one without a STAY (a stay is never assumed).
       if (found.length > 1) found = found.filter((a) => a.stay < 0);
       if (found.length === 1) {
@@ -774,19 +827,24 @@ function workerMain(scope) {
           // The previous card was misread: swap it in the unseen counts.
           P.deck[P.current.r]++;
           P.deck[a.r]--;
-          note = `that card was a ${E.RANK_LABELS[a.r]}, not ${P.current.label} · `;
+          notes.push(`that card was a ${E.RANK_LABELS[a.r]}, not ${P.current.label}`);
           P.current = { r: a.r, label: E.RANK_LABELS[a.r] };
         }
         G = P;
         place(a.col, a.stay);
         enterCard(label);
         autoCard = G.current;
-        p = alignment(colTotals(G.cols), obs);
-        note += a.stay >= 0 ? `you stayed ${a.stay + 1} and played ${a.col + 1}` : `played on column ${a.col + 1}`;
+        p = alignment(G.cols, r);
+        notes.push(a.stay >= 0 ? `you stayed ${a.stay + 1} and played ${a.col + 1}` : `played on column ${a.col + 1}`);
       }
     }
+    if (!p && syncColumns(r)) {
+      p = [0, 1, 2, 3];
+      notes.push('columns copied from the screen');
+    }
     if (!p) {
-      setBoard(`Board: screen ${obs.map((v) => v ?? '?').join(' ')} · advisor ${colTotals(G.cols).join(' ')}`, 'error');
+      Vision.settleLearning(false); // what the last check learned may have come from a wrong board
+      setBoard(`Board: screen ${obs.map((v) => v ?? '?').join(' ')} · advisor ${colTotals(G.cols).join(' ')} (can't read every card yet)`, 'error');
       toast('Board mismatch', 'Fix it with Undo or Edit state', true);
       say('Check the board');
       return;
@@ -795,15 +853,35 @@ function workerMain(scope) {
       snapshot();
       G.cols = p.map((src) => G.cols[src]);
       commit();
-      if (!note) note = 'columns re-aligned';
+      if (!notes.length) notes.push('columns re-aligned');
     }
-    if (note) {
-      toast('Board corrected', note);
-      say('Board corrected');
-    }
-    // Board agrees: learn digits not read yet, then check the cards-left count.
+    // Columns agree: learn what the reader can't read yet.
     const exp = colTotals(G.cols);
     r.totals.forEach((t, i) => Vision.learnNumber('total', exp[i], t));
+    r.cols.forEach((col, c) => {
+      if (col.n !== G.cols[c].length) return;
+      // a card read as another rank is only corrected when the column's total was read in full and agreed
+      const sure = r.totals[c].pat !== null && !r.totals[c].pat.includes('?');
+      col.slots.forEach((s, k) => (s.label === null || sure) && Vision.learnSlot(G.cols[c][k].label, s));
+    });
+    // Score and busts: the screen wins once it can be read.
+    const shownScore = r.score.pat && !r.score.pat.includes('?') ? Number(r.score.pat) : null;
+    const fixScore = shownScore !== null && shownScore !== G.score;
+    const fixBusts = r.busts !== null && r.busts !== G.busts;
+    if (!fixScore && fits(G.score, r.score.pat)) Vision.learnNumber('score', G.score, r.score);
+    if (!fixBusts) Vision.calibrateBusts(G.busts, r.bustMeans);
+    if (fixScore || fixBusts) {
+      snapshot();
+      if (fixScore) notes.push(`score ${fmt(G.score)} → ${fmt(shownScore)}`);
+      if (fixBusts) notes.push(`busts ${G.busts} → ${r.busts}`);
+      if (fixScore) G.score = shownScore;
+      if (fixBusts) G.busts = r.busts;
+      commit();
+    }
+    if (notes.length) {
+      toast('Board corrected', notes.join(' · '));
+      say('Board corrected');
+    }
     const left = deckTotal();
     if (!fits(left, r.deck.pat)) {
       setBoard(`Board: screen has ${r.deck.pat} cards left, advisor ${left}`, 'error');
@@ -812,8 +890,12 @@ function workerMain(scope) {
       return;
     }
     Vision.learnNumber('deck', left, r.deck);
-    const unread = [...obs, r.deck.pat].filter((v) => v === null || v.includes('?')).length;
-    setBoard(note ? `Board ✓ (${note})` : unread ? `Board ✓ (still learning ${unread} number${unread === 1 ? '' : 's'})` : 'Board ✓', 'success');
+    Vision.settleLearning(true);
+    const unread =
+      [...obs, r.deck.pat, r.score.pat].filter((v) => v === null || v.includes('?')).length +
+      r.cols.reduce((n, col) => n + col.slots.filter((s) => s.label === null).length, 0);
+    const what = notes.length ? ` (${notes.join(' · ')})` : unread ? ` (still learning ${unread} spot${unread === 1 ? '' : 's'})` : '';
+    setBoard(`Board ✓${what}`, 'success');
   }
 
   // Speech: one phrase at a time, each finishing before the next starts. Guards against Chrome's
@@ -952,6 +1034,8 @@ function workerMain(scope) {
     onReceiver: (base) => loadMatches(base),
     wantPayout: () => settings.mode === 'cash',
     onPayout: applyScreenCurve,
+    // every ~3 s of samples: re-check the board while a card is waiting to be played
+    onTick: () => ++tickN % 30 === 0 && G.current && !isOver() && !askCard && checkBoard(true),
   });
 
   function renderStatus() {

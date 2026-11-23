@@ -110,9 +110,10 @@ const Vision = (function () {
   const LS = 'tw21.vision.v1';
 
   let opts = null;
-  let saved = { roi: null, thr: 0.8, items: [], nums: [], board: true };
+  let saved = { roi: null, thr: 0.8, items: [], nums: [], slots: [], bustCal: null, board: true };
   let tpl = []; // {f, g: Uint8Array, z: Float32Array}
-  let numTpl = []; // board numbers: {k: 'total' | 'deck', v, g, z}
+  let numTpl = []; // board numbers: {k: 'total' | 'deck' | 'score', v, g, z}
+  let slotTpl = []; // column card corners: {f: label, g, z}
   let stream = null;
   let clone = null;
   let worker = null;
@@ -176,12 +177,14 @@ const Vision = (function () {
         saved = Object.assign(saved, s);
         tpl = (s.items || []).map((t) => makeTpl(t.f, unb64(t.g)));
         numTpl = (s.nums || []).map((t) => Object.assign(makeTpl(t.v, unb64(t.g)), { k: t.k, v: t.v }));
+        slotTpl = (s.slots || []).map((t) => makeTpl(t.f, unb64(t.g)));
       }
     } catch {}
   }
   function persist() {
     saved.items = tpl.map((t) => ({ f: t.f, g: b64(t.g) }));
     saved.nums = numTpl.map((t) => ({ k: t.k, v: t.v, g: b64(t.g) }));
+    saved.slots = slotTpl.map((t) => ({ f: t.f, g: b64(t.g) }));
     try {
       localStorage.setItem(LS, JSON.stringify(saved));
     } catch {}
@@ -194,18 +197,34 @@ const Vision = (function () {
     return rank(z, tpl, (t) => t.f);
   }
 
-  // ---------- board numbers: column totals and cards left, read after each move ----------
-  // Fixed spots on the 21 game screen as fractions of the phone frame (measured on the iPhone mirror, 498 x 1080):
-  // the total in the black circle above each column, and the cards-left count under the deck. Each spot is
-  // grabbed at about native size, split into bright digit glyphs, and each glyph matched against learned digits
-  // (10 per kind, so the reader soon knows every number).
+  // ---------- board: column totals, cards left, every card in the columns, score and busts ----------
+  // Fixed spots on the 21 game screen as fractions of the phone frame (measured on the iPhone mirror, 498 x 1080).
+  // Numbers (totals in the black circles, cards left under the deck, score top right) are split into bright digit
+  // glyphs matched against learned digits. Each column's cards overlap 49 px apart with the rank in the top-left
+  // corner; the stack's bottom edge gives how many there are. All of it is learned from the advisor's own board
+  // while it agrees with the screen.
   const GW = 10; // digit glyph grid
   const GH = 16;
   const NUM_THR = 0.85; // correlation needed to read a digit
   const NUM_KEEP = 3; // templates kept per digit
+  const SLOT_KEEP = 4; // templates kept per card label
+  const SLOT_THR = 0.9; // correlation needed to read a column card (its totals must agree before it's used anyway)
+  const CARD_LEFT = [17, 139.5, 262, 384.5]; // left edge of each column's cards
+  const px = (x, y, w, h, ow = w, oh = h) => ({ x: x / 498, y: y / 1080, w: w / 498, h: h / 1080, ow, oh });
+  const B_TOTAL = 0; // 4 column totals
+  const B_DECK = 4; // cards left
+  const B_SLOT = 5; // 16 rank corners: column c, card k at B_SLOT + 4c + k
+  const B_STACK = 21; // 4 strips down each column, to find where its cards end
+  const B_SCORE = 25;
+  const B_BUST = 26; // 3 bust markers at the top
   const BOARD = [66, 187, 310, 434]
-    .map((cx) => ({ x: (cx - 28) / 498, y: 256 / 1080, w: 56 / 498, h: 36 / 1080, ow: 56, oh: 36 }))
-    .concat([{ x: 165 / 498, y: 998 / 1080, w: 44 / 498, h: 28 / 1080, ow: 44, oh: 28 }]);
+    .map((cx) => px(cx - 28, 256, 56, 36))
+    .concat([px(165, 998, 44, 28)])
+    .concat(CARD_LEFT.flatMap((l) => [0, 1, 2, 3].map((k) => px(l + 2, 324 + 49 * k, 40, 40, 24, 24))))
+    .concat(CARD_LEFT.map((l) => px(l + 20, 315, 55, 405)))
+    .concat([px(345, 84, 130, 32)])
+    .concat([204, 251, 298].map((cx) => px(cx - 7, 80, 14, 14)));
+  const SHOWN = [0, 1, 2, 3, 4, B_SCORE]; // spots outlined on the preview
   let grabSeq = 0;
   const grabs = new Map();
 
@@ -268,10 +287,11 @@ const Vision = (function () {
     return out;
   }
 
-  // {pat, gl}: pat is the number as a digit string with '?' for digits not learned yet; null when no 1-2 digits.
-  function readNumber(k, g, roi) {
+  // {pat, gl}: pat is the number as a digit string with '?' for digits not learned yet; null when it isn't
+  // 1..maxLen digits.
+  function readNumber(k, g, roi, maxLen = 2) {
     const gl = glyphs(g, roi.ow, roi.oh);
-    if (!gl.length || gl.length > 2) return { pat: null, gl };
+    if (!gl.length || gl.length > maxLen) return { pat: null, gl };
     const mine = numTpl.filter((t) => t.k === k);
     const pat = gl
       .map((q) => {
@@ -282,9 +302,26 @@ const Vision = (function () {
     return { pat, gl };
   }
 
-  // Reads the board `delay` ms from now: {stable, totals: [{pat, gl}] x4, deck: {pat, gl}}. stable = the spots did
-  // not change over 300 ms (no animation running). Phone mode only: a shared window has its own borders, so the
-  // fixed spots would miss. null without frames.
+  // Rows down a column strip (from y 315) to the last bright card pixel: 1 card ends at y 463, each more adds 49.
+  function stackCount(g, roi) {
+    for (let y = roi.oh - 1; y >= 0; y--)
+      for (let x = 0; x < roi.ow; x++)
+        if (g[y * roi.ow + x] > 170) {
+          const bottom = 315 + y;
+          return bottom < 430 ? 0 : Math.min(4, Math.max(1, Math.round((bottom - 463) / 49) + 1));
+        }
+    return 0;
+  }
+  function readSlot(g) {
+    const { z, sd } = zscore(g);
+    if (sd < BLANK) return { label: null, g };
+    const r = rank(z, slotTpl, (t) => t.f);
+    return { label: r.best && r.best.c >= SLOT_THR ? r.best.f : null, g };
+  }
+
+  // Reads the board `delay` ms from now: {stable, totals: [{pat, gl}] x4, deck, score: {pat, gl},
+  // cols: [{n, slots: [{label, g}]}] x4, busts: count or null}. stable = nothing changed over 300 ms (no animation).
+  // Phone mode only: a shared window has its own borders, so the fixed spots would miss. null without frames.
   function readBoard(delay) {
     if (!boardOn()) return Promise.resolve(null);
     const id = ++grabSeq;
@@ -292,11 +329,70 @@ const Vision = (function () {
       grabs.set(id, (a, b) => {
         if (!a || !b) return res(null);
         const stable = a.every((g, i) => mad(g, b[i]) < MOTION);
-        const read = b.map((g, i) => readNumber(i < 4 ? 'total' : 'deck', g, BOARD[i]));
-        res({ stable, totals: read.slice(0, 4), deck: read[4] });
+        const bustMeans = [0, 1, 2].map((i) => b[B_BUST + i].reduce((s, v) => s + v, 0) / b[B_BUST + i].length);
+        res({
+          stable,
+          totals: [0, 1, 2, 3].map((c) => readNumber('total', b[B_TOTAL + c], BOARD[B_TOTAL + c])),
+          deck: readNumber('deck', b[B_DECK], BOARD[B_DECK]),
+          score: readNumber('score', b[B_SCORE], BOARD[B_SCORE], 6),
+          cols: [0, 1, 2, 3].map((c) => {
+            const n = stackCount(b[B_STACK + c], BOARD[B_STACK + c]);
+            return { n, slots: [0, 1, 2, 3].slice(0, n).map((k) => readSlot(b[B_SLOT + 4 * c + k])) };
+          }),
+          bustMeans,
+          busts: readBusts(bustMeans),
+        });
       });
       worker.postMessage({ cmd: 'grab', id, rois: BOARD, delay, gap: 300 });
     });
+  }
+
+  // Bust markers: their brightness is learned per marker while the advisor's bust count agrees with the screen.
+  function readBusts(means) {
+    const cal = saved.bustCal;
+    if (!cal || cal.empty.some((v) => v == null)) return null;
+    let n = 0;
+    means.forEach((m, i) => {
+      const filled = cal.filled[i] != null ? Math.abs(m - cal.filled[i]) < Math.abs(m - cal.empty[i]) : m > cal.empty[i] + 25;
+      if (filled) n++;
+    });
+    return n;
+  }
+  function calibrateBusts(busts, means) {
+    const cal = (saved.bustCal = saved.bustCal || { empty: [null, null, null], filled: [null, null, null] });
+    means.forEach((m, i) => {
+      const side = i < busts ? cal.filled : cal.empty;
+      side[i] = side[i] == null ? m : 0.7 * side[i] + 0.3 * m;
+    });
+    persist();
+  }
+
+  // Board templates added by the last board check. If the next check finds a board it can't explain, they were
+  // probably learned from a wrong advisor board (a misread card) and are dropped.
+  let recent = [];
+  let pending = [];
+  function settleLearning(ok) {
+    if (!ok) {
+      const drop = new Set(recent);
+      numTpl = numTpl.filter((t) => !drop.has(t));
+      slotTpl = slotTpl.filter((t) => !drop.has(t));
+      persist();
+    }
+    recent = pending;
+    pending = [];
+  }
+
+  // Learns a column card's corner as `label` when it can't be read, or when it reads as a different rank (adding the
+  // correct example of this exact image outranks the wrong template next time).
+  const rankOf = (f) => Math.min(opts.faces.indexOf(f), 9);
+  function learnSlot(label, rd) {
+    if (rd.label !== null && rankOf(rd.label) === rankOf(label)) return;
+    const t = makeTpl(label, rd.g);
+    slotTpl.push(t);
+    pending.push(t);
+    const mine = slotTpl.filter((x) => x.f === label);
+    if (mine.length > SLOT_KEEP) slotTpl.splice(slotTpl.indexOf(mine[0]), 1);
+    persist();
   }
 
   // Learns the unread ('?') digits of reading `rd` as the digits of `value`.
@@ -306,8 +402,10 @@ const Vision = (function () {
     rd.gl.forEach((q, i) => {
       if (rd.pat[i] !== '?') return;
       const v = Number(ds[i]);
-      numTpl.push(Object.assign(makeTpl(v, q), { k, v }));
-      const mine = numTpl.filter((t) => t.k === k && t.v === v);
+      const t = Object.assign(makeTpl(v, q), { k, v });
+      numTpl.push(t);
+      pending.push(t);
+      const mine = numTpl.filter((x) => x.k === k && x.v === v);
       if (mine.length > NUM_KEEP) numTpl.splice(numTpl.indexOf(mine[0]), 1);
     });
     persist();
@@ -403,10 +501,13 @@ const Vision = (function () {
     last = g;
     drawSig(g);
     maybeReadPayout();
+    opts.onTick();
     const motion = prev ? mad(g, prev) : 255;
     prev = g;
     const m = classify(g);
-    const face = m.best && m.best.c >= saved.thr ? m.best.f : null;
+    // Until every card is learned, an unknown card can look like a known one: demand a closer match then.
+    const thr = learnedAll() ? saved.thr : Math.max(saved.thr, 0.9);
+    const face = m.best && m.best.c >= thr ? m.best.f : null;
     if (accepted && mad(g, accepted) > CHANGE) changed = true;
     if (face !== acceptedFace) left = true;
     stableN = motion < MOTION ? stableN + 1 : 0;
@@ -510,7 +611,10 @@ const Vision = (function () {
         const done = grabs.get(d.grab);
         grabs.delete(d.grab);
         if (done) done(d.a, d.b);
-      } else if (d.tick) maybeReadPayout();
+      } else if (d.tick) {
+        maybeReadPayout();
+        opts.onTick();
+      }
       else if ('live' in d) {
         live = d.live;
         if (live) rearm(); // mirroring (re)started: the card showing may already be entered
@@ -641,7 +745,7 @@ const Vision = (function () {
     if (!phone || !saved.board) return;
     c.strokeStyle = '#6fb3ff'; // board numbers checked after each move
     c.setLineDash([4, 3]);
-    for (const b of BOARD) c.strokeRect(b.x * w, b.y * h, b.w * w, b.h * h);
+    for (const i of SHOWN) c.strokeRect(BOARD[i].x * w, BOARD[i].y * h, BOARD[i].w * w, BOARD[i].h * h);
     c.setLineDash([]);
   }
 
@@ -697,10 +801,12 @@ const Vision = (function () {
       opts.onEmpty();
     };
     $('btnCapForget').onclick = () => {
-      const n = tpl.length + numTpl.length;
-      if (!n || !confirm(`Forget all ${tpl.length} learned card images and ${numTpl.length} board numbers?`)) return;
+      const n = tpl.length + numTpl.length + slotTpl.length;
+      if (!n || !confirm(`Forget all ${tpl.length} learned card images and everything learned about the board?`)) return;
       tpl = [];
       numTpl = [];
+      slotTpl = [];
+      saved.bustCal = null;
       persist();
       renderLearned();
     };
@@ -723,5 +829,5 @@ const Vision = (function () {
 
   const boardOn = () => !!(worker && phone && live && saved.board);
 
-  return { init, learn, rearm, learnedAll, readBoard, learnNumber, boardOn, active: () => !!worker };
+  return { init, learn, rearm, learnedAll, readBoard, learnNumber, learnSlot, settleLearning, calibrateBusts, boardOn, active: () => !!worker };
 })();
