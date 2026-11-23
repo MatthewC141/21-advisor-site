@@ -253,6 +253,13 @@ function workerMain(scope) {
       toast('Bust!', lost ? 'Game lost' : `${G.busts} of ${settings.rules.maxBusts}`, true);
     }
     commit();
+    if (askColumn) {
+      // the move the board couldn't show was just placed by hand: now the waiting card comes in
+      const f = askColumn.face;
+      askColumn = null;
+      enterCard(f);
+      autoCard = G.current;
+    }
   }
 
   // Strategy record: every move matched the advice (deviations) and every move could be checked (unverified).
@@ -718,10 +725,7 @@ function workerMain(scope) {
       nextGame();
       toast('New game', 'detected on screen');
     }
-    advance();
-    enterCard(face);
-    autoCard = G.current;
-    checkBoard();
+    nextCardShown(face);
   }
 
   // Card picked by hand (picker, keyboard, pop-out).
@@ -729,13 +733,99 @@ function workerMain(scope) {
     if (askCard || quietUnknown) {
       askCard = quietUnknown = false;
       Vision.learn(face);
-      advance();
-      enterCard(face);
-      checkBoard();
+      nextCardShown(face);
       return;
     }
     if (autoCard && G.current === autoCard && face !== autoCard.label) Vision.learn(face);
     enterCard(face);
+  }
+
+  // The next card is on screen, so the current one has been played. When the board can be read, the advisor's
+  // board only changes by the move seen on the mirrored board; otherwise (a shared window, board check off) the
+  // advised move is assumed and checked afterwards.
+  function nextCardShown(face) {
+    if (G.current && !isOver() && Vision.boardOn()) return observeMove(face);
+    advance();
+    enterCard(face);
+    autoCard = G.current;
+    checkBoard();
+  }
+
+  // ---------- the move you made, read off the board ----------
+  let observing = null; // {face}: the next card waits while the move just made is read off the board
+  let askColumn = null; // {face}: the move couldn't be read; the next column you place on (click, Shift+1-4) is it
+
+  // The legal move of the current card (or, if none fits, of a misread card) that turns the advisor's board into the
+  // screen's. Several moves can look alike while digits are still being learned: then the advised one if it is
+  // among them, else the only one without a STAY. null if the screen doesn't single one out.
+  function resolveMove(r) {
+    const S = stateS();
+    const fitting = (rk) =>
+      E.enumActions(ctx, S, rk)
+        .filter((a) => alignment(movedCols(G, a, { r: rk, label: E.RANK_LABELS[rk] }), r))
+        .map((a) => Object.assign(a, { r: rk }));
+    let found = fitting(G.current.r);
+    const misread = !found.length;
+    if (misread) found = E.RANK_LABELS.flatMap((_, rk) => (rk !== G.current.r && G.deck[rk] > 0 ? fitting(rk) : []));
+    if (found.length > 1 && !misread) {
+      const rec = recommended();
+      const adv = rec && found.find((a) => sameMove(a, rec));
+      if (adv) found = [adv];
+    }
+    if (found.length > 1) found = found.filter((a) => a.stay < 0);
+    return found.length === 1 ? { a: found[0], misread } : null;
+  }
+
+  // Places the resolved move (for the strategy record against the advice standing now) and, if a next card is
+  // waiting, enters it; then lines the columns up with the screen.
+  function applyObserved({ a, misread }, r, face) {
+    if (cur && cur.chunks.length) cur.stats = computeStats();
+    const rec = misread ? null : recommended(); // advice for a misread card proves nothing
+    if (misread) {
+      toast('Card corrected', `that card was a ${E.RANK_LABELS[a.r]}, not ${G.current.label}`);
+      G.deck[G.current.r]++;
+      G.deck[a.r]--;
+      G.current = { r: a.r, label: E.RANK_LABELS[a.r] };
+    }
+    place(a.col, a.stay, rec);
+    if (!face) return;
+    enterCard(face);
+    autoCard = G.current;
+    judgeBoard(r, null, false);
+  }
+
+  async function observeMove(face) {
+    if (observing) {
+      observing.face = face; // played again while the first move was being read: the newest card is current
+      return;
+    }
+    observing = { face };
+    const seq = ++boardSeq;
+    boardBusy = true;
+    renderRec();
+    try {
+      let unchanged = 0;
+      for (let tries = 0; tries < 8; tries++) {
+        const r = await Vision.readBoard(400); // the placed card may still be landing
+        if (seq !== boardSeq || !r) break;
+        if (!r.stable) continue;
+        if (alignment(G.cols, r)) {
+          // Board as before (card counts too): nothing was played. After a few looks, the "new" card was the
+          // current one misread or re-read: it replaces it, and the board stays.
+          if (++unchanged < 3) continue;
+          if (observing.face !== G.current.label) enterCard(observing.face);
+          return;
+        }
+        const m = resolveMove(r);
+        if (m) return applyObserved(m, r, observing.face);
+      }
+      askColumn = { face: observing.face };
+      say('Which column?');
+    } finally {
+      observing = null;
+      if (seq === boardSeq) boardBusy = false;
+      renderRec();
+    }
   }
 
   // ---------- board check: the mirrored board is the truth ----------
@@ -839,7 +929,12 @@ function workerMain(scope) {
     const obs = r.totals.map((t) => t.pat);
     let p = alignment(G.cols, r);
     const notes = [];
-    if (!p && periodic && pendingMove(r)) return; // its new-card check follows
+    if (!p && periodic && pendingMove(r)) {
+      // the current card has been played; normally the next card brings it in, but after the last card none comes
+      const m = deckTotal() === 0 && resolveMove(r);
+      if (m) applyObserved(m, r, null);
+      return;
+    }
     if (!p && pre) {
       // The board differs from the advised move: find what actually happened from the previous board. First the
       // legal moves with the card as read, then (a misread card) the same with every other rank still unseen.
@@ -1070,7 +1165,7 @@ function workerMain(scope) {
     wantPayout: () => settings.mode === 'cash',
     onPayout: applyScreenCurve,
     // every ~3 s of samples: re-check the board while a card is waiting to be played
-    onTick: () => ++tickN % 30 === 0 && G.current && !isOver() && !askCard && checkBoard(true),
+    onTick: () => ++tickN % 30 === 0 && G.current && !isOver() && !askCard && !askColumn && !observing && checkBoard(true),
   });
 
   function renderStatus() {
@@ -1178,6 +1273,12 @@ function workerMain(scope) {
     } else if (askCard) {
       el.className = 'tstatus stay';
       el.innerHTML = '<span>New card — tap which one it is</span>';
+    } else if (observing) {
+      el.className = 'tstatus think';
+      el.innerHTML = '<span>Reading your move off the board…</span>';
+    } else if (askColumn) {
+      el.className = 'tstatus stay';
+      el.innerHTML = '<span>Which column did you play? Tap it (STAY first if you stayed)</span>';
     } else if (!G.current) {
       el.className = 'tstatus';
       el.innerHTML = '<span>Waiting for next card</span>';
