@@ -1126,11 +1126,13 @@ function workerMain(scope) {
     const notes = [];
     if (!p && periodic && pendingMove(r)) {
       // The board shows the current card played but no new-card event came (e.g. the next card looks the same, or
-      // it was the last card): the board itself brings the move in, with the card now in the box.
+      // it was the last card): the board itself brings the move in, with the card now in the box. That card is the
+      // next one only once the cards-left count shows it dealt; until then the box may still show the played card.
       const m = resolveMoves([], r) || resolveMisread(r);
       const face = Vision.boxFace();
-      diag(`check: board moved without a card event (move ${m ? 'found' : 'not found'}, box ${face || '-'})`);
-      if (m && (face || deckTotal() === 0)) applyObserved(m, r, [{ face, img: Vision.lastImage() }]);
+      const dealt = !!r.deck.pat && !r.deck.pat.includes('?') && Number(r.deck.pat) === deckTotal() - 1;
+      diag(`check: board moved without a card event (move ${m ? 'found' : 'not found'}, box ${face || '-'}, ${dealt ? 'next card dealt' : 'next card not dealt yet'})`);
+      if (m && ((face && dealt) || deckTotal() === 0)) applyObserved(m, r, [{ face, img: Vision.lastImage() }]);
       return;
     }
     if (!p && pre) {
