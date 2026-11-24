@@ -14,27 +14,34 @@ function visionWorker(scope) {
   let g2 = null;
   let W = 0;
   let H = 0;
-  function sample() {
-    if (!latest || !roi) return;
+  let aspect = 0; // phone mode: width / height of the phone; wider frames are cropped to their centre
+  // Source rectangle of roi (fractions of the phone screen) in the current frame. The game, started while
+  // mirroring, draws a wide 1920x1080 "TV" table instead of mirroring the phone; the phone's portrait table sits
+  // centred in it at the same size, so the phone screen is the centred phone-shaped column of the frame.
+  function src(r) {
     const fw = latest.displayWidth || latest.width; // VideoFrame or ImageBitmap
     const fh = latest.displayHeight || latest.height;
-    g2.drawImage(latest, roi.x * fw, roi.y * fh, Math.max(1, roi.w * fw), Math.max(1, roi.h * fh), 0, 0, W, H);
+    const pw = aspect && fw > fh * aspect ? fh * aspect : fw;
+    const x0 = (fw - pw) / 2;
+    return [x0 + r.x * pw, r.y * fh, Math.max(1, r.w * pw), Math.max(1, r.h * fh)];
+  }
+  function sample() {
+    if (!latest || !roi) return;
+    g2.drawImage(latest, ...src(roi), 0, 0, W, H);
     const d = g2.getImageData(0, 0, W, H).data;
     const g = new Uint8Array(W * H);
     for (let i = 0; i < g.length; i++) g[i] = (d[4 * i] * 77 + d[4 * i + 1] * 150 + d[4 * i + 2] * 29) >> 8;
     scope.postMessage({ gray: g.buffer }, [g.buffer]);
   }
-  // Board spots: each roi {x, y, w, h} (fractions of the frame) scaled to ow x oh grayscale.
+  // Board spots: each roi {x, y, w, h} (fractions of the phone screen) scaled to ow x oh grayscale.
   const g3 = new OffscreenCanvas(1, 1).getContext('2d', { willReadFrequently: true });
   function grabAll(rois) {
     if (!latest) return null;
-    const fw = latest.displayWidth || latest.width;
-    const fh = latest.displayHeight || latest.height;
     return rois.map((r) => {
       g3.canvas.width = r.ow;
       g3.canvas.height = r.oh;
       g3.imageSmoothingQuality = 'high';
-      g3.drawImage(latest, r.x * fw, r.y * fh, r.w * fw, r.h * fh, 0, 0, r.ow, r.oh);
+      g3.drawImage(latest, ...src(r), 0, 0, r.ow, r.oh);
       const d = g3.getImageData(0, 0, r.ow, r.oh).data;
       const g = new Uint8Array(r.ow * r.oh);
       for (let i = 0; i < g.length; i++) g[i] = (d[4 * i] * 77 + d[4 * i + 1] * 150 + d[4 * i + 2] * 29) >> 8;
@@ -81,6 +88,7 @@ function visionWorker(scope) {
       g2 = new OffscreenCanvas(W, H).getContext('2d', { willReadFrequently: true });
       g2.imageSmoothingQuality = 'high';
       roi = m.roi;
+      aspect = m.aspect || 0;
       if (m.url) poll(m.url, m.interval);
       else {
         pump(m.readable.getReader());
@@ -121,7 +129,9 @@ const Vision = (function () {
   let workerUrl = null;
   let phone = null; // AirPlay receiver name when the page is served by receiver/serve.py
   let live = false; // phone mode: the iPhone is mirroring
-  const view = () => (phone ? $('capImg') : $('capVideo'));
+  // phone mode: the preview's wrapper is phone-shaped and shows the centre of wide frames (see visionWorker.src)
+  const view = () => (phone ? $('capImg').parentNode : $('capVideo'));
+  const PHONE_ASPECT = 498 / 1080; // this iPhone's screen, as mirrored
 
   // detector
   let prev = null;
@@ -602,7 +612,7 @@ const Vision = (function () {
     await fetch(rxBase + 'receiver/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tab: TAB }) }).catch(() => {});
     paused = false;
     $('btnRx').hidden = true;
-    spawn({ url: new URL(rxBase + 'receiver/frame.jpg?tab=' + TAB, location.href).href }, []);
+    spawn({ url: new URL(rxBase + 'receiver/frame.jpg?tab=' + TAB, location.href).href, aspect: PHONE_ASPECT }, []);
   }
   function startPhone(name, base) {
     if (worker) stop(); // a shared-window capture gives way
@@ -615,6 +625,7 @@ const Vision = (function () {
     $('btnCap').hidden = true;
     $('capVideo').hidden = true;
     $('capImg').hidden = false;
+    $('capImg').parentNode.classList.add('phone');
     $('capImg').src = base + 'receiver/stream.mjpg';
     claim();
     opts.onReceiver(base);
