@@ -33,7 +33,8 @@ function visionWorker(scope) {
     for (let i = 0; i < g.length; i++) g[i] = (d[4 * i] * 77 + d[4 * i + 1] * 150 + d[4 * i + 2] * 29) >> 8;
     scope.postMessage({ gray: g.buffer }, [g.buffer]);
   }
-  // Board spots: each roi {x, y, w, h} (fractions of the phone screen) scaled to ow x oh grayscale.
+  // Board spots: each roi {x, y, w, h} (fractions of the phone screen) scaled to ow x oh grayscale (min = the
+  // darkest of R, G, B instead of brightness).
   const g3 = new OffscreenCanvas(1, 1).getContext('2d', { willReadFrequently: true });
   function grabAll(rois) {
     if (!latest) return null;
@@ -44,7 +45,8 @@ function visionWorker(scope) {
       g3.drawImage(latest, ...src(r), 0, 0, r.ow, r.oh);
       const d = g3.getImageData(0, 0, r.ow, r.oh).data;
       const g = new Uint8Array(r.ow * r.oh);
-      for (let i = 0; i < g.length; i++) g[i] = (d[4 * i] * 77 + d[4 * i + 1] * 150 + d[4 * i + 2] * 29) >> 8;
+      if (r.min) for (let i = 0; i < g.length; i++) g[i] = Math.min(d[4 * i], d[4 * i + 1], d[4 * i + 2]);
+      else for (let i = 0; i < g.length; i++) g[i] = (d[4 * i] * 77 + d[4 * i + 1] * 150 + d[4 * i + 2] * 29) >> 8;
       return g;
     });
   }
@@ -117,9 +119,8 @@ function visionWorker(scope) {
 
 const Vision = (function () {
   const $ = (id) => document.getElementById(id);
-  const W = 24; // sample grid
+  const W = 24; // sample grid (window capture's card box)
   const H = 32;
-  const N = W * H;
   const INTERVAL = 100; // ms between samples
   const STABLE = 3; // motion-free samples before the box counts as settled
   const MOTION = 4; // mean gray-level change between samples that counts as motion
@@ -130,10 +131,8 @@ const Vision = (function () {
   const LS = 'tw21.vision.v1';
 
   let opts = null;
-  let saved = { roi: null, thr: 0.8, items: [], nums: [], slots: [], bustCal: null, board: true };
-  let tpl = []; // {f, g: Uint8Array, z: Float32Array}
-  let numTpl = []; // board numbers: {k: 'total' | 'deck' | 'score', v, g, z}
-  let slotTpl = []; // column card corners: {f: label, g, z}
+  let saved = { roi: null, thr: 0.8, items: [], board: true };
+  let tpl = []; // window capture's learned cards: {f, g: Uint8Array, z: Float32Array}
   let stream = null;
   let clone = null;
   let worker = null;
@@ -198,17 +197,16 @@ const Vision = (function () {
     try {
       const s = JSON.parse(localStorage.getItem(LS));
       if (s) {
+        delete s.nums; // board digits, card corners and bust markers were learned before the built-in templates
+        delete s.slots;
+        delete s.bustCal;
         saved = Object.assign(saved, s);
         tpl = (s.items || []).map((t) => makeTpl(t.f, unb64(t.g)));
-        numTpl = (s.nums || []).map((t) => Object.assign(makeTpl(t.v, unb64(t.g)), { k: t.k, v: t.v }));
-        slotTpl = (s.slots || []).map((t) => makeTpl(t.f, unb64(t.g)));
       }
     } catch {}
   }
   function persist() {
     saved.items = tpl.map((t) => ({ f: t.f, g: b64(t.g) }));
-    saved.nums = numTpl.map((t) => ({ k: t.k, v: t.v, g: b64(t.g) }));
-    saved.slots = slotTpl.map((t) => ({ f: t.f, g: b64(t.g) }));
     try {
       localStorage.setItem(LS, JSON.stringify(saved));
     } catch {}
@@ -221,41 +219,50 @@ const Vision = (function () {
     return rank(z, tpl, (t) => t.f);
   }
 
-  // ---------- board: column totals, cards left, every card in the columns, score and busts ----------
+  // ---------- board: column totals, cards left, every card in the columns ----------
   // Fixed spots on the 21 game screen as fractions of the phone frame (measured on the iPhone mirror, 498 x 1080).
-  // Numbers (totals in the black circles, cards left under the deck, score top right) are split into bright digit
-  // glyphs matched against learned digits. Each column's cards overlap 49 px apart with the rank in the top-left
-  // corner; the stack's bottom edge gives how many there are. All of it is learned from the advisor's own board
-  // while it agrees with the screen.
-  const GW = 10; // digit glyph grid
+  // Numbers (totals in the black circles, cards left under the deck) and card ranks (the dealt card's corner, the
+  // corners of the cards in the columns) are split into glyphs and matched against built-in templates cut from
+  // recorded games (screen-glyphs.js): nothing is learned. Each column's cards overlap 49 px apart with the rank in
+  // the top-left corner; the stack's bottom edge gives how many there are.
+  const GW = 10; // glyph grid for ranks
   const GH = 16;
-  const NUM_THR = 0.85; // correlation needed to read a digit
-  const NUM_KEEP = 3; // templates kept per digit
-  const SLOT_KEEP = 4; // templates kept per card label
-  const SLOT_THR = 0.9; // correlation needed to read a column card (its totals must agree before it's used anyway)
+  const GRID = { dealt: [10, 16], slot: [10, 16], total: [12, 20], deck: [12, 20] };
+  // Correlations needed. On the recordings, a game's glyphs matched the other game's templates at 0.93+ (ranks
+  // 0.977+) while anything else stayed under 0.85 (0.76 in the dealt card's corner).
+  const DEALT_THR = 0.9;
+  const SLOT_THR = 0.88;
+  const NUM_THR = 0.85;
+  const BUILTIN = {}; // kind -> [{f: label, g, z}]
+  for (const [kind, labels] of Object.entries(typeof SCREEN_GLYPHS === 'undefined' ? {} : SCREEN_GLYPHS))
+    BUILTIN[kind] = Object.entries(labels).flatMap(([f, list]) => list.map((s) => makeTpl(f, unb64(s))));
+  const RANKS = new Set(['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']);
   const CARD_LEFT = [17, 139.5, 262, 384.5]; // left edge of each column's cards
   const px = (x, y, w, h, ow = w, oh = h) => ({ x: x / 498, y: y / 1080, w: w / 498, h: h / 1080, ow, oh });
-  const B_TOTAL = 0; // 4 column totals
+  const DEALT = px(271, 861, 40, 34, 80, 68); // rank in the corner of the dealt card, read at 2x
+  const B_TOTAL = 0; // 4 column totals (wide enough for a soft "10/20")
   const B_DECK = 4; // cards left
   const B_SLOT = 5; // 16 rank corners: column c, card k at B_SLOT + 4c + k
   const B_STACK = 21; // 4 strips down each column, to find where its cards end
-  const B_SCORE = 25;
-  const B_BUST = 26; // 3 bust markers at the top
+  const B_BUST = 25; // 3 bust markers at the top: an empty one is black (mean brightness under 15), a bust a red X (~100)
+  const BUST_LIT = 50;
+  // Totals are grabbed as min(R, G, B) (`min`): the gold ring around them goes dark (little blue) while the white
+  // digits stay bright, so a wide "10/20" never runs into the ring.
   const BOARD = [66, 187, 310, 434]
-    .map((cx) => px(cx - 28, 256, 56, 36))
-    .concat([px(165, 998, 44, 28)])
-    .concat(CARD_LEFT.flatMap((l) => [0, 1, 2, 3].map((k) => px(l + 2, 324 + 49 * k, 40, 40, 24, 24))))
+    .map((cx) => Object.assign(px(cx - 44, 256, 88, 36, 176, 72), { min: true }))
+    .concat([px(165, 998, 44, 28, 132, 84)])
+    .concat(CARD_LEFT.flatMap((l) => [0, 1, 2, 3].map((k) => px(l + 2, 324 + 49 * k, 40, 40, 80, 80))))
     .concat(CARD_LEFT.map((l) => px(l + 20, 315, 55, 405)))
-    .concat([px(345, 84, 130, 32)])
     .concat([204, 251, 298].map((cx) => px(cx - 7, 80, 14, 14)));
-  const SHOWN = [0, 1, 2, 3, 4, B_SCORE]; // spots outlined on the preview
+  const SHOWN = [0, 1, 2, 3, 4]; // spots outlined on the preview (with the dealt card's)
   let grabSeq = 0;
   const grabs = new Map();
 
   // Bright-on-dark digits in a w x h gray image, left to right, each scaled to gh rows (keeping its shape, so a
   // narrow 1 stays narrow) and centred in gw columns; avg = area-average each cell (for upscaled grabs) instead of
-  // sampling its centre. [] when nothing bright.
-  function glyphs(g, w, h, gw0 = GW, gh0 = GH, avg = false) {
+  // sampling its centre; inner = skip marks touching the left or right edge (what's left of a ring). [] when nothing
+  // bright.
+  function glyphs(g, w, h, gw0 = GW, gh0 = GH, avg = false, inner = false) {
     let lo = 255;
     let hi = 0;
     for (const v of g) {
@@ -274,6 +281,7 @@ const Vision = (function () {
       if (r && r[1] === x - 1) r[1] = x;
       else runs.push([x, x]);
     }
+    if (inner) runs.splice(0, runs.length, ...runs.filter(([x0, x1]) => x0 > 0 && x1 < w - 1));
     const out = [];
     for (const [x0, x1] of runs) {
       let y0 = h;
@@ -311,19 +319,51 @@ const Vision = (function () {
     return out;
   }
 
-  // {pat, gl}: pat is the number as a digit string with '?' for digits not learned yet; null when it isn't
-  // 1..maxLen digits.
-  function readNumber(k, g, roi, maxLen = 2) {
-    const gl = glyphs(g, roi.ow, roi.oh);
-    if (!gl.length || gl.length > maxLen) return { pat: null, gl };
-    const mine = numTpl.filter((t) => t.k === k);
-    const pat = gl
+  // Best label per glyph against the built-in templates of `kind`: {s: labels joined, c: weakest match}.
+  function matchGlyphs(kind, gl) {
+    let s = '';
+    let c = 1;
+    for (const q of gl) {
+      const r = rank(zscore(q).z, BUILTIN[kind] || [], (t) => t.f);
+      if (!r.best) return { s: '', c: 0 };
+      s += r.best.f;
+      c = Math.min(c, r.best.c);
+    }
+    return { s, c };
+  }
+
+  // {pat}: a column total or cards left as a digit string, '?' for a glyph that matches nothing well (covered by an
+  // animation); null when it isn't a number. A soft total shows as "10/20": its best total (after the slash) counts.
+  function readNumber(kind, g, roi) {
+    const [gw, gh] = GRID[kind];
+    const gl = glyphs(g, roi.ow, roi.oh, gw, gh, true, kind === 'total');
+    if (!gl.length || gl.length > 5) return { pat: null };
+    let pat = gl
       .map((q) => {
-        const r = rank(zscore(q).z, mine, (t) => t.v);
-        return r.best && r.best.c >= NUM_THR ? String(r.best.f) : '?';
+        const m = matchGlyphs(kind, [q]);
+        return m.c >= NUM_THR ? m.s : '?';
       })
       .join('');
-    return { pat, gl };
+    if (pat.includes('/')) pat = pat.slice(pat.lastIndexOf('/') + 1);
+    return { pat: pat && pat.length <= 2 ? pat : null };
+  }
+
+  // A rank in the corner of a card (dark or red on white): 'A'..'10', 'J', 'Q', 'K' with its weakest glyph match, or
+  // null when the spot doesn't hold a card corner showing a rank (felt, a card back, a card sliding past).
+  function readRank(kind, g, w, h) {
+    let white = 0;
+    for (const v of g) if (v > 170) white++;
+    if (white < g.length / 2) return null;
+    const [gw, gh] = GRID[kind];
+    const gl = glyphs(g.map((v) => 255 - v), w, h, gw, gh, true);
+    if (!gl.length || gl.length > 2) return null;
+    const m = matchGlyphs(kind, gl);
+    return RANKS.has(m.s) ? { face: m.s, c: m.c } : null;
+  }
+  // The dealt card, shaped like classify()'s result: no readable rank counts as no card.
+  function readDealt(g) {
+    const r = readRank('dealt', g, DEALT.ow, DEALT.oh);
+    return r && r.c >= DEALT_THR ? { best: { f: r.face, c: r.c } } : { blank: true };
   }
 
   // Rows down a column strip (from y 315) to the last bright card pixel: 1 card ends at y 463, each more adds 49.
@@ -336,18 +376,15 @@ const Vision = (function () {
         }
     return 0;
   }
-  function readSlot(g) {
-    const { z, sd } = zscore(g);
-    if (sd < BLANK) return { label: null, g };
-    const r = rank(z, slotTpl, (t) => t.f);
-    return { label: r.best && r.best.c >= SLOT_THR ? r.best.f : null, g };
+  function readSlot(g, roi) {
+    const r = readRank('slot', g, roi.ow, roi.oh);
+    return { label: r && r.c >= SLOT_THR ? r.face : null };
   }
 
-  // Reads the board `delay` ms from now: {stable, totals: [{pat, gl}] x4, deck, score: {pat, gl},
-  // cols: [{n, slots: [{label, g}]}] x4, busts: count or null}. stable = two grabs 300 ms apart read the same
-  // (numbers, card counts, cards, busts); pixels alone never settle on the real game, the timer and video compression
-  // keep them shimmering. Phone mode only: a shared window has its own borders, so the fixed spots would miss. null
-  // without frames.
+  // Reads the board `delay` ms from now: {stable, totals: [{pat}] x4, deck: {pat}, cols: [{n, slots: [{label}]}] x4,
+  // busts: 0-3 or null}. stable = two grabs 300 ms apart read the same; pixels alone never settle on the real game,
+  // the timer and video compression keep them shimmering. Phone mode only: a shared window has its own borders, so
+  // the fixed spots would miss. null without frames.
   function readBoard(delay) {
     if (!boardOn()) return Promise.resolve(null);
     const id = ++grabSeq;
@@ -356,90 +393,27 @@ const Vision = (function () {
         if (!a || !b) return res(null);
         const ra = parseBoard(a);
         const rb = parseBoard(b);
-        const key = (r) => JSON.stringify([r.totals.map((t) => t.pat), r.deck.pat, r.score.pat, r.cols.map((c) => [c.n, c.slots.map((s) => s.label)]), r.busts]);
+        const key = (r) => JSON.stringify([r.totals.map((t) => t.pat), r.deck.pat, r.cols.map((c) => [c.n, c.slots.map((s) => s.label)]), r.busts]);
         res(Object.assign(rb, { stable: key(ra) === key(rb) }));
       });
       worker.postMessage({ cmd: 'grab', id, rois: BOARD, delay, gap: 300 });
     });
   }
   function parseBoard(b) {
-    const bustMeans = [0, 1, 2].map((i) => b[B_BUST + i].reduce((s, v) => s + v, 0) / b[B_BUST + i].length);
+    // busts fill the markers from the left; any other pattern is something drawn over them
+    const lit = [0, 1, 2].map((i) => b[B_BUST + i].reduce((s, v) => s + v, 0) / b[B_BUST + i].length > BUST_LIT);
+    const busts = lit.filter(Boolean).length;
     return {
       totals: [0, 1, 2, 3].map((c) => readNumber('total', b[B_TOTAL + c], BOARD[B_TOTAL + c])),
       deck: readNumber('deck', b[B_DECK], BOARD[B_DECK]),
-      score: readNumber('score', b[B_SCORE], BOARD[B_SCORE], 6),
       cols: [0, 1, 2, 3].map((c) => {
         const n = stackCount(b[B_STACK + c], BOARD[B_STACK + c]);
-        return { n, slots: [0, 1, 2, 3].slice(0, n).map((k) => readSlot(b[B_SLOT + 4 * c + k])) };
+        return { n, slots: [0, 1, 2, 3].slice(0, n).map((k) => readSlot(b[B_SLOT + 4 * c + k], BOARD[B_SLOT + 4 * c + k])) };
       }),
-      bustMeans,
-      busts: readBusts(bustMeans),
+      busts: lit.every((on, i) => on === i < busts) ? busts : null,
     };
   }
-
-  // Bust markers: their brightness is learned per marker while the advisor's bust count agrees with the screen.
-  function readBusts(means) {
-    const cal = saved.bustCal;
-    if (!cal || cal.empty.some((v) => v == null)) return null;
-    let n = 0;
-    means.forEach((m, i) => {
-      const filled = cal.filled[i] != null ? Math.abs(m - cal.filled[i]) < Math.abs(m - cal.empty[i]) : m > cal.empty[i] + 25;
-      if (filled) n++;
-    });
-    return n;
-  }
-  function calibrateBusts(busts, means) {
-    const cal = (saved.bustCal = saved.bustCal || { empty: [null, null, null], filled: [null, null, null] });
-    means.forEach((m, i) => {
-      const side = i < busts ? cal.filled : cal.empty;
-      side[i] = side[i] == null ? m : 0.7 * side[i] + 0.3 * m;
-    });
-    persist();
-  }
-
-  // Board templates added by the last board check. If the next check finds a board it can't explain, they were
-  // probably learned from a wrong advisor board (a misread card) and are dropped.
-  let recent = [];
-  let pending = [];
-  function settleLearning(ok) {
-    if (!ok) {
-      const drop = new Set(recent);
-      numTpl = numTpl.filter((t) => !drop.has(t));
-      slotTpl = slotTpl.filter((t) => !drop.has(t));
-      persist();
-    }
-    recent = pending;
-    pending = [];
-  }
-
-  // Learns a column card's corner as `label` when it can't be read, or when it reads as a different rank (adding the
-  // correct example of this exact image outranks the wrong template next time).
   const rankOf = (f) => Math.min(opts.faces.indexOf(f), 9);
-  function learnSlot(label, rd) {
-    if (rd.label !== null && rankOf(rd.label) === rankOf(label)) return;
-    const t = makeTpl(label, rd.g);
-    slotTpl.push(t);
-    pending.push(t);
-    const mine = slotTpl.filter((x) => x.f === label);
-    if (mine.length > SLOT_KEEP) slotTpl.splice(slotTpl.indexOf(mine[0]), 1);
-    persist();
-  }
-
-  // Learns the unread ('?') digits of reading `rd` as the digits of `value`.
-  function learnNumber(k, value, rd) {
-    const ds = String(value);
-    if (!rd.pat || ds.length !== rd.gl.length) return;
-    rd.gl.forEach((q, i) => {
-      if (rd.pat[i] !== '?') return;
-      const v = Number(ds[i]);
-      const t = Object.assign(makeTpl(v, q), { k, v });
-      numTpl.push(t);
-      pending.push(t);
-      const mine = numTpl.filter((x) => x.k === k && x.v === v);
-      if (mine.length > NUM_KEEP) numTpl.splice(numTpl.indexOf(mine[0]), 1);
-    });
-    persist();
-  }
 
   // ---------- payout screen: read the game's payout graph before a cash game ----------
   // The graph's right edge lists 10 scores on evenly spaced gridlines (iPhone mirror, 498 x 1080: rows 43 px apart
@@ -557,9 +531,11 @@ const Vision = (function () {
     opts.onTick();
     const motion = prev ? mad(g, prev) : 255;
     prev = g;
-    const m = classify(g);
+    // iPhone receiver: the dealt card's corner sits at a fixed spot and is read with the built-in templates.
+    // A shared window: the box you drew, against the cards you taught.
+    const m = phone ? readDealt(g) : classify(g);
     // Until every card is learned, an unknown card can look like a known one: demand a closer match then.
-    const thr = learnedAll() ? saved.thr : Math.max(saved.thr, 0.9);
+    const thr = phone ? DEALT_THR : learnedAll() ? saved.thr : Math.max(saved.thr, 0.9);
     // A near tie with a different rank (a 2 against a 3 in a small corner box) is treated as unknown: asking once,
     // and learning that exact image, beats a confident misread.
     const close = m.second && m.best.c - m.second.c < 0.05 && m.best.f !== EMPTY && m.second.f !== EMPTY && rankOf(m.best.f) !== rankOf(m.second.f);
@@ -707,7 +683,8 @@ const Vision = (function () {
         opts.onStatus(blank ? 'Blank picture: stop Screen Mirroring, keep 21 open, then mirror again' : 'Picture is back');
       } else if (!blank) onGray(new Uint8Array(d.gray)); // a blank picture shows no card: nothing to read
     };
-    worker.postMessage(Object.assign({ cmd: 'start', roi: saved.roi, w: W, h: H, interval: INTERVAL }, src), transfer);
+    const box = phone ? { roi: DEALT, w: DEALT.ow, h: DEALT.oh } : { roi: saved.roi, w: W, h: H };
+    worker.postMessage(Object.assign({ cmd: 'start', interval: INTERVAL }, box, src), transfer);
     rearm();
     renderPanel();
   }
@@ -728,10 +705,11 @@ const Vision = (function () {
     changed = left = initial = true;
   }
 
-  // Stores the image of the last card event (or `g`) as a template for `face`.
+  // Stores the image of the last card event (or `g`) as a template for `face`. Window capture only: the iPhone
+  // receiver reads cards with the built-in templates.
   function learn(face, g) {
     g = g || eventGray;
-    if (!g || !saved.roi) return false;
+    if (phone || !g || !saved.roi) return false;
     tpl.push(makeTpl(face, g));
     if (g === accepted) {
       // The box still holds the image just taught (or corrected): it is now this card, not a new one.
@@ -761,14 +739,15 @@ const Vision = (function () {
     else if (!on) setState('off');
     else if (phone && !live) setState('waiting for iPhone', 'warning');
     else if (blank) setState('picture is blank: stop Screen Mirroring, keep 21 open, then mirror again', 'error');
-    else if (!saved.roi) setState('draw a box on the preview', 'warning');
+    else if (!phone && !saved.roi) setState('draw a box on the preview', 'warning');
     else setState(phone ? 'iPhone connected' : 'watching', 'success');
     $('capThr').value = saved.thr;
     $('capBoard').checked = saved.board;
     $('capBoardRow').hidden = !phone;
+    for (const id of ['capTeach', 'capTeachHint', 'capLearned']) $(id).hidden = !!phone; // the receiver's reader is built in: nothing to draw or teach
     renderLearned();
     if (phone && !live) $('capRead').textContent = `Waiting for the iPhone to mirror to "${phone}".`;
-    else if (!saved.roi) $('capRead').textContent = 'Drag a box around the rank in the corner of the card you are dealt.';
+    else if (!phone && !saved.roi) $('capRead').textContent = 'Drag a box around the rank in the corner of the card you are dealt.';
     drawOverlay();
   }
 
@@ -783,8 +762,9 @@ const Vision = (function () {
       .join('');
   }
 
-  // Every card face has a template: from then on, a box without a known card means no game is on screen.
-  const learnedAll = () => opts.faces.every((f) => tpl.some((t) => t.f === f));
+  // Every card face has a template: from then on, a box without a known card means no game is on screen. The
+  // receiver's built-in templates know every card.
+  const learnedAll = () => !!phone || opts.faces.every((f) => tpl.some((t) => t.f === f));
 
   function show(m, settled) {
     const name = (f) => (f === EMPTY ? 'empty' : f);
@@ -804,8 +784,11 @@ const Vision = (function () {
 
   function drawSig(g) {
     const c = $('capSig').getContext('2d');
-    const img = c.createImageData(W, H);
-    for (let i = 0; i < N; i++) {
+    const [w, h] = phone ? [DEALT.ow, DEALT.oh] : [W, H];
+    if (c.canvas.width !== w) c.canvas.width = w;
+    if (c.canvas.height !== h) c.canvas.height = h;
+    const img = c.createImageData(w, h);
+    for (let i = 0; i < w * h; i++) {
       img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = g[i];
       img.data[4 * i + 3] = 255;
     }
@@ -821,7 +804,7 @@ const Vision = (function () {
     if (ov.height !== h) ov.height = h;
     const c = ov.getContext('2d');
     c.clearRect(0, 0, w, h);
-    r = r || saved.roi;
+    r = r || (phone ? DEALT : saved.roi);
     if (!r) return;
     c.fillStyle = 'rgba(0,0,0,.45)';
     c.fillRect(0, 0, w, h);
@@ -855,6 +838,7 @@ const Vision = (function () {
     };
     let drag = null;
     ov.addEventListener('pointerdown', (e) => {
+      if (phone) return; // the receiver reads the dealt card at a fixed spot
       drag = { p: pt(e), r: null };
       ov.setPointerCapture(e.pointerId);
     });
@@ -888,12 +872,8 @@ const Vision = (function () {
       opts.onEmpty();
     };
     $('btnCapForget').onclick = () => {
-      const n = tpl.length + numTpl.length + slotTpl.length;
-      if (!n || !confirm(`Forget all ${tpl.length} learned card images and everything learned about the board?`)) return;
+      if (!tpl.length || !confirm(`Forget all ${tpl.length} learned card images?`)) return;
       tpl = [];
-      numTpl = [];
-      slotTpl = [];
-      saved.bustCal = null;
       persist();
       renderLearned();
     };
@@ -917,7 +897,7 @@ const Vision = (function () {
   const boardOn = () => !!(worker && phone && live && !blank && saved.board);
 
   return {
-    init, learn, rearm, learnedAll, readBoard, learnNumber, learnSlot, settleLearning, calibrateBusts, scanPayout, boardOn,
+    init, learn, rearm, learnedAll, readBoard, scanPayout, boardOn,
     active: () => !!worker,
     boxFace: () => boxFace, // card recognised in the box right now (null: none, unknown or not learned)
     tab: TAB,

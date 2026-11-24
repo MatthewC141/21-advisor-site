@@ -380,14 +380,14 @@
               <label class="row"><input type="checkbox" id="capBoard"> <span class="muted">Check the board after each move (blue boxes)</span></label>
               <span id="capBoardState" class="hint"></span>
             </div>
-            <div class="row">
+            <div class="row" id="capTeach">
               <button class="btn dark" id="btnCapEmpty" title="Teach what the box looks like with no card in it">Box is empty now</button>
               <button class="btn dark" id="btnCapForget">Forget cards</button>
               <label class="pin" title="How closely the box must match a learned card (0.5–0.99)"><span>Match</span><input id="capThr" type="number" min="0.5" max="0.99" step="0.01"></label>
             </div>
           </div>
         </div>
-        <div class="hint" style="margin-top:6px">Drag a tight box around the rank in the corner of the card you're dealt (the one waiting to be placed).
+        <div class="hint" id="capTeachHint" style="margin-top:6px">Drag a tight box around the rank in the corner of the card you're dealt (the one waiting to be placed).
           The first time each card shows, the reader asks: tap it on the picker (here or in the pop-out) and it learns it. If it ever misreads,
           tap the right card and it learns that too.</div>
         <details style="margin-top:6px"><summary class="hint">Reader log</summary><pre id="capLog" class="hint" style="max-height:180px; overflow:auto; margin:6px 0 0; white-space:pre-wrap"></pre></details>
@@ -481,6 +481,7 @@
 <script src="params.js"></script>
 <script src="advisor-scores.js"></script>
 <script src="payout-digits.js"></script>
+<script src="screen-glyphs.js"></script>
 <script src="vision.js"></script>
 <script src="app.js"></script>
 </body>
