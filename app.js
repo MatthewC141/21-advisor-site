@@ -737,8 +737,7 @@ function workerMain(scope) {
       }
       if (Vision.boardOn())
         return void Vision.readBoard(0).then((r) => {
-          const fresh = r && r.deck.pat !== null && Number(r.deck.pat) >= 50 && r.totals.every((t, i) => t.pat === '0' || r.cols[i].n <= 1);
-          if (!fresh || !isOver()) return diag(`card ${face} after the game ended: no new game on screen (cards left ${r ? r.deck.pat : '-'})`);
+          if (!freshTable(r) || !isOver()) return diag(`card ${face} after the game ended: no new game on screen (cards left ${r ? r.deck.pat : '-'})`);
           nextGame();
           toast('New game', 'detected on screen');
           nextCardShown(face);
@@ -918,6 +917,7 @@ function workerMain(scope) {
           unchanged = 0;
         }
         if (!r.stable) continue;
+        if (newGameOnScreen(r)) return startNewGame(cards[cards.length - 1]);
         if (cards.length === 1 && alignment(G.cols, r)) {
           // Board as before (card counts too): nothing was played. After a few looks (~1.5 s), the "new" card was
           // the current one misread or re-read: it replaces it, and the board stays.
@@ -1103,7 +1103,23 @@ function workerMain(scope) {
     diag(d > 0 ? `${d} card${d === 1 ? '' : 's'} went by unseen: taken off the unseen counts` : `${-d} card${d === -1 ? '' : 's'} counted twice: put back`);
   }
 
+  // A fresh table on screen: 50+ cards left and at most the first card placed.
+  const freshTable = (r) => !!r && r.deck.pat !== null && !r.deck.pat.includes('?') && Number(r.deck.pat) >= 50 && r.totals.every((t, i) => t.pat === '0' || r.cols[i].n <= 1);
+  // ...while the advisor's game is well under way: the game it followed ended (Final Score went by) and a new one began.
+  const newGameOnScreen = (r) => freshTable(r) && Number(r.deck.pat) > deckTotal() + 2;
+  function startNewGame(card) {
+    diag(`new game on screen (cards left ${deckTotal()} → 51)`);
+    askColumn = null;
+    nextGame();
+    toast('New game', 'detected on screen');
+    if (!card || !card.face) return;
+    enterCard(card.face);
+    autoCard = G.current;
+    cardImg = { card: G.current, img: card.img };
+  }
+
   function judgeBoard(r, pre, periodic) {
+    if (newGameOnScreen(r) && Vision.boxFace()) return startNewGame({ face: Vision.boxFace(), img: Vision.lastImage() });
     if (isOver() || !G.current) return;
     const obs = r.totals.map((t) => t.pat);
     let p = alignment(G.cols, r);
