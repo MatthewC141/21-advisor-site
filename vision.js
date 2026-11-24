@@ -121,7 +121,7 @@ const Vision = (function () {
   const $ = (id) => document.getElementById(id);
   const W = 24; // sample grid (window capture's card box)
   const H = 32;
-  const INTERVAL = 100; // ms between samples
+  const INTERVAL = 50; // ms between samples
   const STABLE = 3; // motion-free samples before the box counts as settled
   const MOTION = 4; // mean gray-level change between samples that counts as motion
   const CHANGE = 10; // mean change from the last settled image that means a different card (or none) showed
@@ -382,7 +382,7 @@ const Vision = (function () {
   }
 
   // Reads the board `delay` ms from now: {stable, totals: [{pat}] x4, deck: {pat}, cols: [{n, slots: [{label}]}] x4,
-  // busts: 0-3 or null}. stable = two grabs 300 ms apart read the same; pixels alone never settle on the real game,
+  // busts: 0-3 or null}. stable = two grabs 150 ms apart read the same; pixels alone never settle on the real game,
   // the timer and video compression keep them shimmering. Phone mode only: a shared window has its own borders, so
   // the fixed spots would miss. null without frames.
   function readBoard(delay) {
@@ -396,7 +396,7 @@ const Vision = (function () {
         const key = (r) => JSON.stringify([r.totals.map((t) => t.pat), r.deck.pat, r.cols.map((c) => [c.n, c.slots.map((s) => s.label)]), r.busts]);
         res(Object.assign(rb, { stable: key(ra) === key(rb) }));
       });
-      worker.postMessage({ cmd: 'grab', id, rois: BOARD, delay, gap: 300 });
+      worker.postMessage({ cmd: 'grab', id, rois: BOARD, delay, gap: 150 });
     });
   }
   function parseBoard(b) {
@@ -434,7 +434,7 @@ const Vision = (function () {
     typeof PAYOUT_DIGITS === 'undefined'
       ? []
       : Object.entries(PAYOUT_DIGITS).flatMap(([v, list]) => list.map((s) => Object.assign(makeTpl(Number(v), unb64(s)), { v: Number(v) })));
-  const PAY_EVERY = 15; // samples between payout-screen checks (about 1.5 s)
+  const PAY_EVERY = 30; // samples between payout-screen checks (about 1.5 s)
   let payTick = 0;
   let payBusy = false;
   let lastPay = '';

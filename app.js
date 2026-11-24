@@ -61,7 +61,7 @@ function workerMain(scope) {
       h2h: { win: 0.4, opp: 0 }, // win: earned on top of the entry back; opp: typical opponent score (0 = advisor median)
       boost: 0, // cash: payout booster, % added to the whole payout (score thresholds unchanged)
       rules: Object.assign({}, E.DEFAULT_RULES),
-      thinkSec: 3,
+      thinkSec: 1.5,
       workers: Math.max(1, Math.min(12, (navigator.hardwareConcurrency || 4) - 1)),
       speak: true,
     };
@@ -433,8 +433,16 @@ function workerMain(scope) {
     cur.stats = st;
     cur.lastTick = performance.now();
     const el = performance.now() - cur.t0;
+    // Decided once every other move is clearly worse (4 standard errors) or can't be meaningfully better: even its
+    // optimistic bound (2 standard errors) gains under 0.3% on the best. Close calls then don't use the whole think
+    // time on differences too small to matter.
+    const eps = 0.003 * Math.abs(st.rows[st.best] ? st.rows[st.best].ev : 0);
     let decided = st.n >= 800 && st.rows.length > 1;
-    if (decided) for (let j = 0; j < st.rows.length; j++) if (j !== st.best && !(st.rows[j].diff > 4 * st.rows[j].se && st.rows[j].se > 0)) decided = false;
+    if (decided)
+      for (let j = 0; j < st.rows.length; j++) {
+        const row = st.rows[j];
+        if (j !== st.best && !(row.diff > 4 * row.se && row.se > 0) && !(2 * row.se - row.diff < eps)) decided = false;
+      }
     if (el >= cur.budget || decided) {
       stopWorkers();
       announce();
@@ -889,8 +897,9 @@ function workerMain(scope) {
       let last = null;
       let queued = 1;
       let dealing = 0; // reads in a row with one card fewer on screen than seen
-      for (let tries = 0; tries < 8; tries++) {
-        const r = await Vision.readBoard(400); // the placed card may still be landing
+      // a read takes ~0.3 s: up to ~5 s of reads after the last new card
+      for (let tries = 0; tries < 16; tries++) {
+        const r = await Vision.readBoard(150); // the placed card may still be landing
         if (seq !== boardSeq || !r) break;
         last = r;
         const { cards } = observing;
@@ -902,9 +911,9 @@ function workerMain(scope) {
         }
         if (!r.stable) continue;
         if (cards.length === 1 && alignment(G.cols, r)) {
-          // Board as before (card counts too): nothing was played. After a few looks, the "new" card was the
-          // current one misread or re-read: it replaces it, and the board stays.
-          if (++unchanged < 3) continue;
+          // Board as before (card counts too): nothing was played. After a few looks (~1.5 s), the "new" card was
+          // the current one misread or re-read: it replaces it, and the board stays.
+          if (++unchanged < 5) continue;
           if (cards[0].face !== G.current.label) {
             enterCard(cards[0].face);
             cardImg = { card: G.current, img: cards[0].img };
@@ -913,13 +922,13 @@ function workerMain(scope) {
         }
         if (cards.length > MAX_QUEUED) break;
         // Every card seen leaves the deck: the screen's cards-left count must agree, or cards came and went unseen:
-        // then nothing is applied yet. One fewer on screen: the next card is being dealt. Still so a few reads later,
-        // with the newest card's rank showing, it was a second card of that rank the reader took for the first (the
-        // corner shows only the rank): it joins the queue.
+        // then nothing is applied yet. One fewer on screen: the next card is being dealt. Still so a few reads later
+        // (~1.5 s), with the newest card's rank showing, it was a second card of that rank the reader took for the
+        // first (the corner shows only the rank): it joins the queue.
         const left = deckTotal() - cards.length;
         if (fits(left, r.deck.pat)) dealing = 0;
         else if (!fits(left - 1, r.deck.pat)) continue;
-        else if (++dealing >= 3 && Vision.boxFace() === cards[cards.length - 1].face) {
+        else if (++dealing >= 5 && Vision.boxFace() === cards[cards.length - 1].face) {
           cards.push({ face: Vision.boxFace(), img: Vision.lastImage() });
           diag(`another ${Vision.boxFace()} came (cards left ${r.deck.pat})`);
           dealing = 0;
@@ -1301,7 +1310,7 @@ function workerMain(scope) {
     wantPayout: () => settings.mode === 'cash',
     onPayout: applyScreenCurve,
     // every ~1.5 s of samples: re-check the board while a card is waiting to be played
-    onTick: () => ++tickN % 15 === 0 && G.current && !isOver() && !askCard && !askColumn && !observing && checkBoard(true),
+    onTick: () => ++tickN % 30 === 0 && G.current && !isOver() && !askCard && !askColumn && !observing && checkBoard(true),
   });
 
   function renderStatus() {
