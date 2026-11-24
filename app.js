@@ -186,6 +186,7 @@ function workerMain(scope) {
     toastTimer = setTimeout(() => t.classList.remove('show'), 1300);
   }
 
+  const recentRanks = []; // ranks entered lately, newest last: where a card counted twice most likely came from
   function enterCard(face) {
     if (isOver() && !G.current) return;
     const r = faceRank(face);
@@ -193,6 +194,8 @@ function workerMain(scope) {
     if (G.current) G.deck[G.current.r]++;
     if (G.deck[r] <= 0) toast('Check deck', 'Tracker shows no ' + (r === 9 ? '10-value' : FACES[r]) + ' left', true);
     else G.deck[r]--;
+    recentRanks.push(r);
+    if (recentRanks.length > 12) recentRanks.shift();
     G.current = { r, label: face };
     commit();
   }
@@ -885,6 +888,10 @@ function workerMain(scope) {
 
   async function observeMove(face, img) {
     if (observing) {
+      const newest = observing.cards[observing.cards.length - 1];
+      // The same rank again while a move is read is the card read again (a finger dragging it out of the spot); a
+      // real second card of that rank is added once the cards-left count shows it (see `dealing`).
+      if (face === newest.face) return diag(`${face} read again: ignored`);
       observing.cards.push({ face, img }); // played on before this move was read: read them together
       return;
     }
@@ -897,6 +904,7 @@ function workerMain(scope) {
       let last = null;
       let queued = 1;
       let dealing = 0; // reads in a row with one card fewer on screen than seen
+      let miscount = { shown: null, reads: 0 }; // reads in a row with a cards-left count nothing explains
       // a read takes ~0.3 s: up to ~5 s of reads after the last new card
       for (let tries = 0; tries < 16; tries++) {
         const r = await Vision.readBoard(150); // the placed card may still be landing
@@ -927,7 +935,17 @@ function workerMain(scope) {
         // first (the corner shows only the rank): it joins the queue.
         const left = deckTotal() - cards.length;
         if (fits(left, r.deck.pat)) dealing = 0;
-        else if (!fits(left - 1, r.deck.pat)) continue;
+        else if (!fits(left - 1, r.deck.pat)) {
+          // A count nothing explains (a card read twice, or one gone by unseen): the same three reads in a row
+          // (~1 s), the unseen counts are set to match it.
+          const shown = r.deck.pat.includes('?') ? null : Number(r.deck.pat);
+          miscount = shown !== null && shown === miscount.shown ? { shown, reads: miscount.reads + 1 } : { shown, reads: 1 };
+          if (miscount.reads >= 3) {
+            fixCount(shown + cards.length);
+            miscount = { shown: null, reads: 0 };
+          }
+          continue;
+        }
         else if (++dealing >= 5 && Vision.boxFace() === cards[cards.length - 1].face) {
           cards.push({ face: Vision.boxFace(), img: Vision.lastImage() });
           diag(`another ${Vision.boxFace()} came (cards left ${r.deck.pat})`);
@@ -1058,19 +1076,31 @@ function workerMain(scope) {
     return cols.every((cards, i) => fitsCol(cards, r.cols[i], r.totals[i].pat));
   }
 
-  // `n` cards were dealt and played without the reader seeing them: their ranks are unknown, so they come off the
-  // ranks with the most cards still unseen (the likeliest).
+  // Sets the unseen total to `n`, the screen's cards-left count. Cards dealt and played without the reader seeing
+  // them come off the ranks with the most cards still unseen (the likeliest); a card counted twice (read again) goes
+  // back to the ranks entered most recently (after a reload, to the rank seen the most).
   let countMiss = null; // {shown, left, at}: the screen's cards-left count disagreed with the advisor's
-  function dropUnseen(n) {
+  function fixCount(n) {
+    const d = deckTotal() - n;
+    if (!d) return;
     snapshot();
-    for (let i = 0; i < n; i++) {
-      let rk = 0;
-      for (let k = 1; k < G.deck.length; k++) if (G.deck[k] > G.deck[rk]) rk = k;
-      if (G.deck[rk] > 0) G.deck[rk]--;
+    for (let i = 0; i < Math.abs(d); i++) {
+      if (d > 0) {
+        let rk = 0;
+        for (let k = 1; k < G.deck.length; k++) if (G.deck[k] > G.deck[rk]) rk = k;
+        if (G.deck[rk] > 0) G.deck[rk]--;
+      } else {
+        let rk = recentRanks.pop();
+        if (rk === undefined) {
+          rk = 0;
+          for (let k = 1; k < G.deck.length; k++) if (E.FULL_DECK[k] - G.deck[k] > E.FULL_DECK[rk] - G.deck[rk]) rk = k;
+        }
+        if (G.deck[rk] < E.FULL_DECK[rk]) G.deck[rk]++;
+      }
     }
-    G.unverified = (G.unverified || 0) + n;
+    G.unverified = (G.unverified || 0) + Math.abs(d);
     commit();
-    diag(`${n} card${n === 1 ? '' : 's'} went by unseen: taken off the unseen counts`);
+    diag(d > 0 ? `${d} card${d === 1 ? '' : 's'} went by unseen: taken off the unseen counts` : `${-d} card${d === -1 ? '' : 's'} counted twice: put back`);
   }
 
   function judgeBoard(r, pre, periodic) {
@@ -1150,14 +1180,14 @@ function workerMain(scope) {
     }
     const left = deckTotal();
     if (!fits(left, r.deck.pat) && !fits(left - 1, r.deck.pat)) {
-      // A card dealt and played before the reader settled on it never entered the deck count. Seen twice in a row
-      // (not the next card just being dealt), the count is taken from the screen.
+      // A card that went by unseen, or one counted twice: seen the same twice in a row (not the next card just being
+      // dealt), the count is taken from the screen.
       const shown = r.deck.pat.includes('?') ? null : Number(r.deck.pat);
       const now = performance.now();
-      if (shown !== null && shown < left && countMiss && countMiss.shown === shown && countMiss.left === left && now - countMiss.at > 1000) {
+      if (shown !== null && countMiss && countMiss.shown === shown && countMiss.left === left && now - countMiss.at > 1000) {
         countMiss = null;
-        dropUnseen(left - shown);
-        setBoard(`Board ✓ (${left - shown} card${left - shown === 1 ? '' : 's'} went by unseen)`, 'warning');
+        fixCount(shown);
+        setBoard(`Board ✓ (cards left set to ${shown} from the screen)`, 'warning');
         return;
       }
       if (!countMiss || countMiss.shown !== shown || countMiss.left !== left) countMiss = { shown, left, at: now };
