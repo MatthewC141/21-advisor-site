@@ -851,12 +851,13 @@ function workerMain(scope) {
 
   // ---------- board check: the mirrored board is the truth ----------
   // After every move, and every few seconds during a game, the screen is read: column totals, the cards in each
-  // column, cards left, score and busts. Whatever disagrees is fixed to match the screen:
+  // column and cards left. Whatever disagrees is fixed to match the screen:
   //  1. columns in another order are renumbered (an equivalent column was used);
   //  2. a different move than advised (or a misread card): the move that explains the screen is replayed;
-  //  3. otherwise the columns are rebuilt from the cards read off the screen and the unseen counts adjusted;
-  //  then score and busts are taken from the screen. What the reader can't read yet is learned from the advisor's
-  //  board whenever the two agree; only a board it can't read at all is left for you to fix.
+  //  3. otherwise the columns are rebuilt from the cards read off the screen and the unseen counts adjusted.
+  // Score and busts follow from the moves (the screen's score digits misread too easily to overrule them). What the
+  // reader can't read yet is learned from the advisor's board whenever the two agree; only a board it can't read at
+  // all is left for you to fix.
   let lastPre = null; // game JSON just before the reader's assumed move
   let boardSeq = 0;
   let boardBusy = false;
@@ -1027,20 +1028,6 @@ function workerMain(scope) {
       const sure = r.totals[c].pat !== null && !r.totals[c].pat.includes('?');
       col.slots.forEach((s, k) => (s.label === null || sure) && Vision.learnSlot(G.cols[c][k].label, s));
     });
-    // Score and busts: the screen wins once it can be read.
-    const shownScore = r.score.pat && !r.score.pat.includes('?') ? Number(r.score.pat) : null;
-    const fixScore = shownScore !== null && shownScore !== G.score;
-    const fixBusts = r.busts !== null && r.busts !== G.busts;
-    if (!fixScore && fits(G.score, r.score.pat)) Vision.learnNumber('score', G.score, r.score);
-    if (!fixBusts) Vision.calibrateBusts(G.busts, r.bustMeans);
-    if (fixScore || fixBusts) {
-      snapshot();
-      if (fixScore) notes.push(`score ${fmt(G.score)} → ${fmt(shownScore)}`);
-      if (fixBusts) notes.push(`busts ${G.busts} → ${r.busts}`);
-      if (fixScore) G.score = shownScore;
-      if (fixBusts) G.busts = r.busts;
-      commit();
-    }
     if (notes.length) {
       toast('Board corrected', notes.join(' · '));
       say('Board corrected');
@@ -1055,7 +1042,7 @@ function workerMain(scope) {
     Vision.learnNumber('deck', left, r.deck);
     Vision.settleLearning(true);
     const unread =
-      [...obs, r.deck.pat, r.score.pat].filter((v) => v === null || v.includes('?')).length +
+      [...obs, r.deck.pat].filter((v) => v === null || v.includes('?')).length +
       r.cols.reduce((n, col) => n + col.slots.filter((s) => s.label === null).length, 0);
     const what = notes.length ? ` (${notes.join(' · ')})` : unread ? ` (still learning ${unread} spot${unread === 1 ? '' : 's'})` : '';
     setBoard(`Board ✓${what}`, 'success');
