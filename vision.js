@@ -60,8 +60,18 @@ function visionWorker(scope) {
     scope.postMessage({ ended: true });
   }
   // Receiver frames: fetch the newest JPEG each interval; report when the iPhone starts/stops mirroring.
+  // A picture with nothing on it (the game's wide "TV" output goes black): mean brightness of a small copy.
+  const g4 = new OffscreenCanvas(16, 16).getContext('2d', { willReadFrequently: true });
+  function isBlank() {
+    g4.drawImage(latest, ...src({ x: 0, y: 0, w: 1, h: 1 }), 0, 0, 16, 16);
+    const d = g4.getImageData(0, 0, 16, 16).data;
+    let s = 0;
+    for (let i = 0; i < d.length; i += 4) s += d[i] + d[i + 1] + d[i + 2];
+    return s / (16 * 16 * 3) < 4;
+  }
   async function poll(url, interval) {
     let live = null;
+    let blank = null;
     for (;;) {
       const t = Date.now();
       let ok = false;
@@ -76,6 +86,7 @@ function visionWorker(scope) {
         }
       } catch {}
       if (ok !== live) scope.postMessage({ live: (live = ok) });
+      if (ok && isBlank() !== blank) scope.postMessage({ blank: (blank = !blank) });
       if (ok) roi ? sample() : scope.postMessage({ tick: true }); // no card box yet: still drive the payout check
       await new Promise((res) => setTimeout(res, Math.max(0, interval - (Date.now() - t))));
     }
@@ -129,6 +140,7 @@ const Vision = (function () {
   let workerUrl = null;
   let phone = null; // AirPlay receiver name when the page is served by receiver/serve.py
   let live = false; // phone mode: the iPhone is mirroring
+  let blank = false; // phone mode: the picture is black (the game's wide "TV" output can go black)
   // phone mode: the preview's wrapper is phone-shaped and shows the centre of wide frames (see visionWorker.src)
   const view = () => (phone ? $('capImg').parentNode : $('capVideo'));
   const PHONE_ASPECT = 498 / 1080; // this iPhone's screen, as mirrored
@@ -660,6 +672,7 @@ const Vision = (function () {
   function spawn(src, transfer) {
     if (!workerUrl) workerUrl = URL.createObjectURL(new Blob(['(' + visionWorker.toString() + ')(self);'], { type: 'text/javascript' }));
     worker = new Worker(workerUrl);
+    blank = false;
     worker.onmessage = (e) => {
       const d = e.data;
       if (d.ended) stop();
@@ -686,7 +699,13 @@ const Vision = (function () {
         if (live) rearm(); // mirroring (re)started: the card showing may already be entered
         renderPanel();
         if (!live) opts.onStatus(`Waiting for iPhone · Screen Mirroring → ${phone}`);
-      } else onGray(new Uint8Array(d.gray));
+      } else if ('blank' in d) {
+        if (d.blank === blank) return; // the first picture of a connection is reported either way
+        blank = d.blank;
+        renderPanel();
+        note(blank ? 'picture is blank' : 'picture is back');
+        opts.onStatus(blank ? 'Blank picture: stop Screen Mirroring, keep 21 open, then mirror again' : 'Picture is back');
+      } else if (!blank) onGray(new Uint8Array(d.gray)); // a blank picture shows no card: nothing to read
     };
     worker.postMessage(Object.assign({ cmd: 'start', roi: saved.roi, w: W, h: H, interval: INTERVAL }, src), transfer);
     rearm();
@@ -741,6 +760,7 @@ const Vision = (function () {
     if (paused) setState('paused: the advisor is open in another tab', 'warning');
     else if (!on) setState('off');
     else if (phone && !live) setState('waiting for iPhone', 'warning');
+    else if (blank) setState('picture is blank: stop Screen Mirroring, keep 21 open, then mirror again', 'error');
     else if (!saved.roi) setState('draw a box on the preview', 'warning');
     else setState(phone ? 'iPhone connected' : 'watching', 'success');
     $('capThr').value = saved.thr;
@@ -894,7 +914,7 @@ const Vision = (function () {
     else if (location.protocol === 'https:') offerReceiver();
   }
 
-  const boardOn = () => !!(worker && phone && live && saved.board);
+  const boardOn = () => !!(worker && phone && live && !blank && saved.board);
 
   return {
     init, learn, rearm, learnedAll, readBoard, learnNumber, learnSlot, settleLearning, calibrateBusts, scanPayout, boardOn,
